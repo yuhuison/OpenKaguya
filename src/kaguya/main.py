@@ -131,21 +131,7 @@ async def run_cli():
     engine.add_middleware(group_filter)
     engine.add_middleware(memory_mw)
 
-    # 9. 初始化主动意识系统
-    from kaguya.core.consciousness import ConsciousnessScheduler
-
-    consciousness = ConsciousnessScheduler(
-        config=config,
-        chat_engine=engine,
-        send_callback=None,  # CLI 模式下暂不主动推送，仅日志记录
-        db=db,
-    )
-
-    # 10. 初始化适配器
-    adapter = CLIAdapter()
-    adapter.set_handler(engine.handle_message)
-
-    # 条件启动微信适配器
+    # 条件启动微信适配器（先初始化，后面给 consciousness 用）
     wechat_adapter = None
     if config.wechat.enabled:
         from kaguya.adapters.wechat import WeChatAdapter
@@ -154,6 +140,34 @@ async def run_cli():
             identity_manager=identity_mgr,
         )
         wechat_adapter.set_handler(engine.handle_message)
+
+    # 9. 初始化主动意识系统
+    from kaguya.core.consciousness import ConsciousnessScheduler
+
+    # 构建主动意识的发送回调（通过微信发给第一个白名单用户）
+    consciousness_send_cb = None
+    if wechat_adapter and config.wechat.whitelist_users:
+        default_target = config.wechat.whitelist_users[0]
+
+        async def _consciousness_send(text: str, image_path: str | None = None):
+            """主动意识发送回调：发消息给默认用户"""
+            if text:
+                await wechat_adapter._send_single(default_target, text)
+            if image_path:
+                await wechat_adapter._send_image(default_target, image_path)
+
+        consciousness_send_cb = _consciousness_send
+
+    consciousness = ConsciousnessScheduler(
+        config=config,
+        chat_engine=engine,
+        send_callback=consciousness_send_cb,
+        db=db,
+    )
+
+    # 10. 初始化 CLI 适配器
+    adapter = CLIAdapter()
+    adapter.set_handler(engine.handle_message)
 
     # 11. 启动
     logger.info("🌙 OpenKaguya 启动中...")

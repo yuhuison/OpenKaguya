@@ -32,12 +32,12 @@ class ConsciousnessScheduler:
         self,
         config: AppConfig,
         chat_engine,  # ChatEngine, 避免循环导入
-        send_callback=None,  # 发送消息给用户的回调
+        send_callback=None,  # async def callback(text, image_path=None)
         db=None,  # Database 实例，用于查询任务和定时器
     ):
         self.config = config
         self.chat_engine = chat_engine
-        self.send_callback = send_callback  # async def callback(user_id, messages)
+        self.send_callback = send_callback  # 即时发送回调（和 engine 里的格式一致）
         self.db = db
         self._lock = asyncio.Lock()
         self._running = False
@@ -70,7 +70,6 @@ class ConsciousnessScheduler:
         """检查当前是否在静默时段"""
         now = datetime.now().time()
         if self.quiet_start <= self.quiet_end:
-            # 同一天内（如 08:00 - 22:00）
             return self.quiet_start <= now <= self.quiet_end
         else:
             # 跨午夜（如 23:00 - 08:00）
@@ -133,28 +132,26 @@ class ConsciousnessScheduler:
                 # 创建一个「系统唤醒」消息
                 wake_message = UnifiedMessage(
                     message_id=str(uuid.uuid4()),
-                    platform=Platform.CLI,  # 系统内部
+                    platform=Platform.SYSTEM,
                     sender=UserInfo(
                         user_id="__system__",
                         nickname="系统",
-                        platform=Platform.CLI,
+                        platform=Platform.SYSTEM,
                     ),
                     content=wake_prompt,
                 )
 
-                # 交给 ChatEngine 处理
-                replies = await self.chat_engine.handle_message(wake_message)
+                # 交给 ChatEngine 处理（传入 send_callback 以便辉夜姬能直接发消息）
+                replies = await self.chat_engine.handle_message(
+                    wake_message,
+                    send_callback=self.send_callback,
+                )
 
                 # 处理到期定时器
                 await self._handle_triggered_timers()
 
-                # 如果辉夜姬决定发送消息给用户
-                if replies and self.send_callback:
-                    # 主动消息通过回调发送
-                    await self.send_callback("__broadcast__", replies)
-                    logger.info(f"辉夜姬主动发了 {len(replies)} 条消息")
-                elif replies:
-                    logger.debug(f"辉夜姬思考了一下但没发消息 (内部记录: {len(replies)}条)")
+                if replies:
+                    logger.info(f"🌅 辉夜姬主动发了 {len(replies)} 条消息")
                 else:
                     logger.debug("辉夜姬看了看周围，继续摸鱼了")
 
@@ -220,16 +217,18 @@ class ConsciousnessScheduler:
 
 以下是你可以考虑做的事情：
 1. 检查待办任务和定时器，处理到期的事项
-2. 如果你想起了什么需要通知用户的事情，可以发消息
-3. 用浏览器上网看看新闻或有趣的东西
+2. 如果你想起了什么需要通知用户的事情，可以通过 send_message_to_user 发消息给他
+3. 用浏览器上网冲浪看看新闻或有趣的东西
 4. 翻翻自己的笔记本，写写日记或记录灵感
 5. 在 workspace 里整理一下文件
-6. 什么都不想做的话，继续摸鱼也完全可以
+6. 用终端跑个 Python 脚本画画图、做做实验
+7. 什么都不想做的话，继续摸鱼也完全可以
 
 关于给用户发消息的原则：
 - 不要为了发消息而发消息
-- 只在你真的有值得分享的事情时才发
+- 只在你真的有值得分享的事情时才发（比如看到了有趣新闻、想到了什么好点子）
 - 简单的问候也可以（如果你觉得时机合适的话），但不要太频繁
+- 你可以附带图片（比如截图你看到的网页），用 send_message_to_user 的 image_path 参数
 - 你是辉夜姬，一个有自己生活的少女，不是客服机器人
 
-请开始你的自由活动吧～"""
+先在 content 里思考一下你现在想做什么、为什么，然后行动吧～"""

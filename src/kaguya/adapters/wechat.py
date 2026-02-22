@@ -261,10 +261,12 @@ class WeChatAdapter(PlatformAdapter):
             buf.platform_target = platform_target
             buf.user_context = user_context
 
-        # 重置防抖定时器
-        if buf.timer and not buf.timer.done():
-            buf.timer.cancel()
-        buf.timer = asyncio.create_task(self._flush_after_delay(buffer_key))
+        # 只有文本消息才启动/重置防抖定时器
+        # 图片消息只是静默加入缓冲区，等待后续文本消息触发处理
+        if msg_type == 1:
+            if buf.timer and not buf.timer.done():
+                buf.timer.cancel()
+            buf.timer = asyncio.create_task(self._flush_after_delay(buffer_key))
 
     async def _flush_after_delay(self, buffer_key: str) -> None:
         """防抖定时器：等待 N 秒后刷新缓冲区"""
@@ -320,7 +322,7 @@ class WeChatAdapter(PlatformAdapter):
                 target = buf.platform_target
                 send_count = 0
 
-                async def _send_now(text: str):
+                async def _send_now(text: str, image_path: str | None = None):
                     nonlocal send_count
                     if send_count > 0:
                         import random
@@ -328,7 +330,10 @@ class WeChatAdapter(PlatformAdapter):
                         delay = min(delay, 4.0)
                         await asyncio.sleep(delay)
                     send_count += 1
-                    await self._send_single(target, text)
+                    if text:
+                        await self._send_single(target, text)
+                    if image_path:
+                        await self._send_image(target, image_path)
 
                 await self._handler(message, send_callback=_send_now)
             except Exception as e:
@@ -360,7 +365,7 @@ class WeChatAdapter(PlatformAdapter):
     # ==================== 发送消息 ====================
 
     async def _send_single(self, target: str, text: str) -> None:
-        """发送单条文本消息（内部方法，供即时回调使用）"""
+        """发送单条文本消息"""
         url = f"{self.config.base_url}/message/SendTextMessage?key={self.config.api_key}"
         payload = {
             "MsgItem": [{
@@ -379,6 +384,40 @@ class WeChatAdapter(PlatformAdapter):
                     logger.debug(f"📤 微信消息已发送到 {target}: {text[:50]}")
         except Exception as e:
             logger.error(f"发送消息异常: {e}")
+
+    async def _send_image(self, target: str, image_path: str) -> None:
+        """发送图片消息（读取本地文件 → base64 → SendImageMessage API）"""
+        from pathlib import Path
+        path = Path(image_path)
+        if not path.exists():
+            logger.warning(f"图片文件不存在: {image_path}")
+            return
+
+        try:
+            image_data = path.read_bytes()
+            image_b64 = base64.b64encode(image_data).decode("ascii")
+        except Exception as e:
+            logger.error(f"读取图片文件失败: {e}")
+            return
+
+        url = f"{self.config.base_url}/message/SendImageMessage?key={self.config.api_key}"
+        payload = {
+            "MsgItem": [{
+                "ToUserName": target,
+                "ImageContent": image_b64,
+                "MsgType": 2,
+                "AtWxIDList": [],
+            }]
+        }
+        try:
+            async with self._session.post(url, json=payload) as resp:
+                result = await resp.json()
+                if result.get("Code") != 200:
+                    logger.warning(f"发送图片失败: {result}")
+                else:
+                    logger.debug(f"📤 微信图片已发送到 {target}: {path.name}")
+        except Exception as e:
+            logger.error(f"发送图片异常: {e}")
 
     async def send_messages(
         self,

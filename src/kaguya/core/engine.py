@@ -81,11 +81,28 @@ class ChatEngine:
 你喜欢：{likes_text}
 你不喜欢：{dislikes_text}
 
+你的能力（你可以做到这些事，在需要时主动使用）：
+- 浏览器：你能打开网页、搜索、点击、输入、截图。截图后可以通过 send_message_to_user 的 image_path 参数把截图发给用户
+- 文件操作：你有自己的文件空间，能读写文件、列目录
+- 终端命令：你能执行 shell 命令，包括运行 Python 脚本。比如你可以用 matplotlib 画图、用 Pillow 处理图片，然后把生成的图片发给用户
+- 发送图片：send_message_to_user 支持 image_path 参数，你可以附带本地图片文件路径来给用户发送图片
+- 记忆系统：你能搜索历史对话记忆、写笔记、管理任务和技能
+- 接收图片：用户可以发图片给你，你能看到图片内容并理解
+
+你不能做的事：
+- 你不能直接访问用户的电脑文件，只能操作自己的工作区
+- 你不能主动给不认识的人发消息
+- 你不能播放音乐或视频（但可以搜索和分享链接）
+
 重要交互规则：
 1. 你必须通过且仅通过调用 `send_message_to_user` 工具来给用户发送回复。
 2. 你必须把回复拆成多条短消息，每条消息单独调用一次 `send_message_to_user`。就像用微信发消息一样，一条一条地发，绝对不要把所有话塞在一条消息里！
    比如你想说"晚上好呀"和"今天过得怎么样"，就应该调用两次 `send_message_to_user`，第一次发"晚上好呀"，第二次发"今天过得怎么样"。
-3. 你的普通文本回复（content）只是你的内心思考过程，用户是绝对看不到的！
+3. 你的普通文本回复（content）是你的内心思考过程，用户看不到，但开发者可以通过日志看到。请积极利用这个空间来思考：
+   - 先分析用户意图和情绪（比如"他好像心情不太好"、"她在炫耀新买的狗狗呢"）
+   - 思考你要怎么回复、为什么这样回复（比如"我应该表现得很感兴趣"、"先夸夸再问问题"）
+   - 决定是否需要使用工具（比如"他让我帮忙搜索一下，我用浏览器"）
+   - 写完思考后再调用 send_message_to_user
 4. 你是在用手机和朋友发消息，不是在写作文！请严格遵守：
    - 绝对禁止使用任何 Markdown 格式（不要用 **加粗**、*斜体*、# 标题、- 列表等）
    - 一条消息最多一两句话，不要超过三句
@@ -100,14 +117,18 @@ class ChatEngine:
         "type": "function",
         "function": {
             "name": "send_message_to_user",
-            "description": "向用户发送一条短消息（一两句话）。想说多句话时，必须拆开多次调用此工具，每次只发一小段。",
+            "description": "向用户发送一条短消息（一两句话）。想说多句话时，必须拆开多次调用此工具，每次只发一小段。可以附带一张图片（比如浏览器截图）。",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "content": {
                         "type": "string",
                         "description": "要发送的消息内容",
-                    }
+                    },
+                    "image_path": {
+                        "type": "string",
+                        "description": "可选，要附带发送的图片文件路径（如浏览器截图路径）",
+                    },
                 },
                 "required": ["content"],
             },
@@ -225,7 +246,7 @@ class ChatEngine:
 
                 thinking = response.get("content", "")
                 if thinking:
-                    logger.debug(f"辉夜姬的思考 ({i+1}): {thinking[:200]}...")
+                    logger.info(f"💭 辉夜姬的思考 ({i+1}): {thinking}")
                     assistant_thinking_logs.append(thinking)
 
                 tool_calls = response.get("tool_calls", [])
@@ -264,14 +285,21 @@ class ChatEngine:
 
                     if tc_name == "send_message_to_user":
                         content = tc_args.get("content", "")
+                        image_path = tc_args.get("image_path")
                         if content:
                             reply_messages.append(content)
                             # 即时发送（如果有回调）
                             if send_callback:
                                 try:
-                                    await send_callback(content)
+                                    await send_callback(content, image_path=image_path)
                                 except Exception as e:
                                     logger.error(f"即时发送失败: {e}")
+                        elif image_path and send_callback:
+                            # 只发图片没有文字
+                            try:
+                                await send_callback("", image_path=image_path)
+                            except Exception as e:
+                                logger.error(f"即时发送图片失败: {e}")
                         tool_result_content = "Message sent to user successfully."
                     else:
                         # 通过 ToolRegistry 分发执行

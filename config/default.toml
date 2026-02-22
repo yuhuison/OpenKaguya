@@ -62,7 +62,7 @@ port = 8080
 enabled = true
 base_url = "http://open-kaguya.tech:8099"
 # 白名单：只处理这些微信 ID / 群的消息
-whitelist_users  = ["wxid_19dqn48qw92m22"]   # 如 ["wxid_alice123", "wxid_bob456"]
+whitelist_users  = ["wxid_19dqn48qw92m22","wxid_uiepr13gqwaj22","wxid_d9dbtzc92jml21"]   # 如 ["wxid_alice123", "wxid_bob456"]
 whitelist_groups = []   # 如 ["12345678@chatroom"]
 
 # ===== 跨平台用户身份注册表 =====
@@ -75,3 +75,17 @@ nickname = "秋小十/Micks"
 note     = "open-kaguya开发者，INFP，喜欢各种有趣的事物，男生"
 role     = "admin"    # admin / friend / acquaintance
 accounts = ["wechat:wxid_19dqn48qw92m22"]
+
+[[identity.users]]
+id       = "m4tsuri"
+nickname = "M4tsuri"
+note     = "极客/黑客，INFP，男生"
+role     = "admin"    # admin / friend / acquaintance
+accounts = ["wechat:wxid_uiepr13gqwaj22"]
+
+[[identity.users]]
+id       = "SKR"
+nickname = "正经老实人"
+note     = "历史政治爱好者，INTP，男生"
+role     = "admin"    # admin / friend / acquaintance
+accounts = ["wechat:wxid_d9dbtzc92jml21"]
