@@ -147,6 +147,15 @@ class Database:
                 last_triggered_at TIMESTAMP,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
+
+            -- 主动意识行动日志
+            CREATE TABLE IF NOT EXISTS consciousness_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                summary TEXT NOT NULL,
+                target_users TEXT,
+                artifacts TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
         """)
 
         # 话题向量表（只对话题摘要做向量化，不对原始消息）
@@ -328,6 +337,41 @@ class Database:
                         "display_content": r[3], "created_at": r[4],
                     })
             return result
+        return await asyncio.to_thread(_get)
+
+    # ==================== 意识日志 ====================
+
+    async def save_consciousness_log(
+        self, summary: str, target_users: str = "", artifacts: str = ""
+    ) -> None:
+        """保存一条主动意识行动日志"""
+        def _save():
+            self._conn.execute(
+                """INSERT INTO consciousness_logs (summary, target_users, artifacts)
+                   VALUES (?, ?, ?)""",
+                (summary, target_users, artifacts),
+            )
+            self._conn.commit()
+        await asyncio.to_thread(_save)
+
+    async def get_recent_consciousness_logs(self, n: int = 5) -> list[dict]:
+        """获取最近 n 条意识日志"""
+        def _get():
+            rows = self._conn.execute(
+                """SELECT summary, target_users, artifacts, created_at
+                   FROM consciousness_logs
+                   ORDER BY id DESC LIMIT ?""",
+                (n,),
+            ).fetchall()
+            return [
+                {
+                    "summary": r[0],
+                    "target_users": r[1],
+                    "artifacts": r[2],
+                    "created_at": r[3],
+                }
+                for r in reversed(rows)
+            ]
         return await asyncio.to_thread(_get)
 
     # ==================== 话题操作 ====================

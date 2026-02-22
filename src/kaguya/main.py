@@ -196,11 +196,18 @@ async def run_cli():
 
         consciousness_send_cb = _consciousness_send
 
+    # 确定意识系统的目标用户（消息同步 + 日志注入）
+    consciousness_target_user = ""
+    if config.wechat.whitelist_users:
+        consciousness_target_user = config.wechat.whitelist_users[0]
+
     consciousness = ConsciousnessScheduler(
         config=config,
         chat_engine=engine,
         send_callback=consciousness_send_cb,
         db=db,
+        secondary_llm=secondary_llm,
+        target_user_id=consciousness_target_user,
     )
 
     # 10. 初始化 CLI 适配器（仅交互模式）
