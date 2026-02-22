@@ -29,14 +29,22 @@ class BrowserToolkit:
         chrome_path: str = "",
         cdp_url: str = "",
         headless: bool = True,
+        cloud_proxy_country: str = "us",
+        api_key: str = "",
         screenshot_dir: Path | None = None,
     ):
         self.mode = mode
         self.chrome_path = chrome_path
         self.cdp_url = cdp_url
         self.headless = headless
+        self.cloud_proxy_country = cloud_proxy_country
         self.screenshot_dir = screenshot_dir or Path("data/workspaces/kaguya/screenshots")
         self.screenshot_dir.mkdir(parents=True, exist_ok=True)
+
+        # Cloud 模式需要 API Key（通过环境变量传递给 browser-use）
+        if api_key:
+            import os
+            os.environ["BROWSER_USE_API_KEY"] = api_key
 
         self._browser = None
         self._page = None
@@ -48,15 +56,20 @@ class BrowserToolkit:
 
         from browser_use import Browser
 
-        kwargs = {}
-        if self.mode == "cdp" and self.cdp_url:
-            kwargs["cdp_url"] = self.cdp_url
-        elif self.mode == "local":
-            kwargs["headless"] = self.headless
+        if self.mode == "cloud":
+            self._browser = Browser(
+                use_cloud=True,
+                cloud_proxy_country_code=self.cloud_proxy_country,
+            )
+        elif self.mode == "cdp" and self.cdp_url:
+            self._browser = Browser(cdp_url=self.cdp_url)
+        else:
+            # local 模式
+            kwargs = {"headless": self.headless}
             if self.chrome_path:
                 kwargs["executable_path"] = self.chrome_path
+            self._browser = Browser(**kwargs)
 
-        self._browser = Browser(**kwargs)
         await self._browser.start()
         logger.info(f"浏览器已启动 (模式: {self.mode})")
 

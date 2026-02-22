@@ -50,13 +50,15 @@ class Database:
     def _sync_connect(self) -> None:
         """同步连接（在线程池中执行）"""
         self._conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
+        self._conn.execute("PRAGMA journal_mode=WAL")  # WAL 模式，支持读写并发
+        self._conn.execute("PRAGMA foreign_keys=ON")
         self._conn.enable_load_extension(True)
         sqlite_vec.load(self._conn)
         self._conn.enable_load_extension(False)
         
         # 验证
         version = self._conn.execute("SELECT vec_version()").fetchone()[0]
-        logger.debug(f"sqlite-vec v{version} 加载成功")
+        logger.debug(f"sqlite-vec v{version} 加载成功 (WAL mode)")
 
     async def close(self) -> None:
         """关闭数据库连接"""
@@ -98,6 +100,38 @@ class Database:
                 tags TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+
+            CREATE TABLE IF NOT EXISTS skills (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL UNIQUE,
+                description TEXT NOT NULL,
+                trigger_keywords TEXT,
+                is_active BOOLEAN DEFAULT TRUE,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+
+            CREATE TABLE IF NOT EXISTS tasks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                title TEXT NOT NULL,
+                description TEXT,
+                status TEXT DEFAULT 'pending',
+                priority INTEGER DEFAULT 0,
+                due_at TIMESTAMP,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                completed_at TIMESTAMP
+            );
+
+            CREATE TABLE IF NOT EXISTS timers (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                cron_expression TEXT,
+                trigger_at TIMESTAMP,
+                action TEXT NOT NULL,
+                is_recurring BOOLEAN DEFAULT FALSE,
+                is_active BOOLEAN DEFAULT TRUE,
+                last_triggered_at TIMESTAMP,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
         """)
 
@@ -315,3 +349,173 @@ class Database:
             self._conn.commit()
 
         await asyncio.to_thread(_save)
+
+    async def get_daily_logs(self, user_id: str | None = None, limit: int = 10) -> list[dict]:
+        """获取日志摘要列表"""
+        def _get():
+            if user_id:
+                rows = self._conn.execute(
+                    "SELECT id, user_id, summary, created_at FROM daily_logs WHERE user_id = ? ORDER BY id DESC LIMIT ?",
+                    (user_id, limit),
+                ).fetchall()
+            else:
+                rows = self._conn.execute(
+                    "SELECT id, user_id, summary, created_at FROM daily_logs ORDER BY id DESC LIMIT ?",
+                    (limit,),
+                ).fetchall()
+            return [{"id": r[0], "user_id": r[1], "summary": r[2], "created_at": r[3]} for r in rows]
+        return await asyncio.to_thread(_get)
+
+    # ==================== 笔记本操作 ====================
+
+    async def save_note(self, title: str, content: str, tags: str = "") -> int:
+        """保存笔记，返回 ID"""
+        def _save():
+            cursor = self._conn.execute(
+                "INSERT INTO notebook (title, content, tags) VALUES (?, ?, ?)",
+                (title, content, tags),
+            )
+            self._conn.commit()
+            return cursor.lastrowid
+        return await asyncio.to_thread(_save)
+
+    async def get_notes(self, tag: str | None = None, limit: int = 20) -> list[dict]:
+        """获取笔记列表"""
+        def _get():
+            if tag:
+                rows = self._conn.execute(
+                    "SELECT id, title, content, tags, created_at FROM notebook WHERE tags LIKE ? ORDER BY id DESC LIMIT ?",
+                    (f"%{tag}%", limit),
+                ).fetchall()
+            else:
+                rows = self._conn.execute(
+                    "SELECT id, title, content, tags, created_at FROM notebook ORDER BY id DESC LIMIT ?",
+                    (limit,),
+                ).fetchall()
+            return [{"id": r[0], "title": r[1], "content": r[2], "tags": r[3], "created_at": r[4]} for r in rows]
+        return await asyncio.to_thread(_get)
+
+    # ==================== 技能操作 ====================
+
+    async def save_skill(self, name: str, description: str, trigger_keywords: str = "") -> int:
+        """保存技能"""
+        def _save():
+            cursor = self._conn.execute(
+                "INSERT OR REPLACE INTO skills (name, description, trigger_keywords) VALUES (?, ?, ?)",
+                (name, description, trigger_keywords),
+            )
+            self._conn.commit()
+            return cursor.lastrowid
+        return await asyncio.to_thread(_save)
+
+    async def get_skills(self, active_only: bool = True) -> list[dict]:
+        """获取技能列表"""
+        def _get():
+            sql = "SELECT id, name, description, trigger_keywords, is_active FROM skills"
+            if active_only:
+                sql += " WHERE is_active = TRUE"
+            return self._conn.execute(sql).fetchall()
+        rows = await asyncio.to_thread(_get)
+        return [{"id": r[0], "name": r[1], "description": r[2], "trigger_keywords": r[3], "is_active": r[4]} for r in rows]
+
+    async def delete_skill(self, name: str) -> bool:
+        """删除技能"""
+        def _del():
+            self._conn.execute("DELETE FROM skills WHERE name = ?", (name,))
+            self._conn.commit()
+            return self._conn.total_changes > 0
+        return await asyncio.to_thread(_del)
+
+    # ==================== 任务操作 ====================
+
+    async def save_task(self, title: str, description: str = "", priority: int = 0, due_at: str | None = None) -> int:
+        """保存任务"""
+        def _save():
+            cursor = self._conn.execute(
+                "INSERT INTO tasks (title, description, priority, due_at) VALUES (?, ?, ?, ?)",
+                (title, description, priority, due_at),
+            )
+            self._conn.commit()
+            return cursor.lastrowid
+        return await asyncio.to_thread(_save)
+
+    async def get_tasks(self, status: str | None = None, limit: int = 20) -> list[dict]:
+        """获取任务列表"""
+        def _get():
+            if status:
+                rows = self._conn.execute(
+                    "SELECT id, title, description, status, priority, due_at, created_at FROM tasks WHERE status = ? ORDER BY priority DESC, id DESC LIMIT ?",
+                    (status, limit),
+                ).fetchall()
+            else:
+                rows = self._conn.execute(
+                    "SELECT id, title, description, status, priority, due_at, created_at FROM tasks ORDER BY priority DESC, id DESC LIMIT ?",
+                    (limit,),
+                ).fetchall()
+            return [{"id": r[0], "title": r[1], "description": r[2], "status": r[3], "priority": r[4], "due_at": r[5], "created_at": r[6]} for r in rows]
+        return await asyncio.to_thread(_get)
+
+    async def update_task_status(self, task_id: int, status: str) -> None:
+        """更新任务状态"""
+        def _update():
+            extra = ", completed_at = CURRENT_TIMESTAMP" if status == "done" else ""
+            self._conn.execute(f"UPDATE tasks SET status = ?{extra} WHERE id = ?", (status, task_id))
+            self._conn.commit()
+        await asyncio.to_thread(_update)
+
+    async def delete_task(self, task_id: int) -> None:
+        """删除任务"""
+        def _del():
+            self._conn.execute("DELETE FROM tasks WHERE id = ?", (task_id,))
+            self._conn.commit()
+        await asyncio.to_thread(_del)
+
+    # ==================== 定时器操作 ====================
+
+    async def save_timer(
+        self, name: str, action: str,
+        trigger_at: str | None = None,
+        cron_expression: str | None = None,
+        is_recurring: bool = False,
+    ) -> int:
+        """保存定时器"""
+        def _save():
+            cursor = self._conn.execute(
+                "INSERT INTO timers (name, action, trigger_at, cron_expression, is_recurring) VALUES (?, ?, ?, ?, ?)",
+                (name, action, trigger_at, cron_expression, is_recurring),
+            )
+            self._conn.commit()
+            return cursor.lastrowid
+        return await asyncio.to_thread(_save)
+
+    async def get_active_timers(self) -> list[dict]:
+        """获取所有活跃定时器"""
+        def _get():
+            return self._conn.execute(
+                "SELECT id, name, action, trigger_at, cron_expression, is_recurring, last_triggered_at FROM timers WHERE is_active = TRUE",
+            ).fetchall()
+        rows = await asyncio.to_thread(_get)
+        return [{"id": r[0], "name": r[1], "action": r[2], "trigger_at": r[3], "cron": r[4], "recurring": r[5], "last_triggered": r[6]} for r in rows]
+
+    async def get_triggered_timers(self) -> list[dict]:
+        """获取已到期的一次性定时器"""
+        def _get():
+            return self._conn.execute(
+                "SELECT id, name, action, trigger_at FROM timers WHERE is_active = TRUE AND is_recurring = FALSE AND trigger_at <= datetime('now', 'localtime')",
+            ).fetchall()
+        rows = await asyncio.to_thread(_get)
+        return [{"id": r[0], "name": r[1], "action": r[2], "trigger_at": r[3]} for r in rows]
+
+    async def deactivate_timer(self, timer_id: int) -> None:
+        """停用定时器"""
+        def _update():
+            self._conn.execute("UPDATE timers SET is_active = FALSE, last_triggered_at = CURRENT_TIMESTAMP WHERE id = ?", (timer_id,))
+            self._conn.commit()
+        await asyncio.to_thread(_update)
+
+    async def delete_timer(self, timer_id: int) -> None:
+        """删除定时器"""
+        def _del():
+            self._conn.execute("DELETE FROM timers WHERE id = ?", (timer_id,))
+            self._conn.commit()
+        await asyncio.to_thread(_del)

@@ -96,11 +96,28 @@ async def run_cli():
             chrome_path=config.browser.chrome_path,
             cdp_url=config.browser.cdp_url,
             headless=config.browser.headless,
+            cloud_proxy_country=config.browser.cloud_proxy_country,
+            api_key=config.browser.api_key,
         )
         tool_registry.register_all(browser_toolkit.get_tools())
         logger.info(f"浏览器工具已注册 (模式: {config.browser.mode})")
 
-    # 7. 初始化对话引擎 & 注册中间件
+    # 7. 初始化用户身份管理器
+    from kaguya.core.identity import UserIdentityManager, UserIdentity
+
+    identities = [
+        UserIdentity(
+            id=u.id,
+            nickname=u.nickname,
+            note=u.note,
+            role=u.role,
+            accounts=u.accounts,
+        )
+        for u in config.identity.users
+    ]
+    identity_mgr = UserIdentityManager(identities)
+
+    # 8. 初始化对话引擎 & 注册中间件
     engine = ChatEngine(
         config=config,
         primary_llm=primary_llm,
@@ -114,22 +131,36 @@ async def run_cli():
     engine.add_middleware(group_filter)
     engine.add_middleware(memory_mw)
 
-    # 8. 初始化主动意识系统
+    # 9. 初始化主动意识系统
     from kaguya.core.consciousness import ConsciousnessScheduler
 
     consciousness = ConsciousnessScheduler(
         config=config,
         chat_engine=engine,
         send_callback=None,  # CLI 模式下暂不主动推送，仅日志记录
+        db=db,
     )
 
-    # 9. 初始化 CLI 适配器
+    # 10. 初始化适配器
     adapter = CLIAdapter()
     adapter.set_handler(engine.handle_message)
 
-    # 10. 启动
+    # 条件启动微信适配器
+    wechat_adapter = None
+    if config.wechat.enabled:
+        from kaguya.adapters.wechat import WeChatAdapter
+        wechat_adapter = WeChatAdapter(
+            config=config.wechat,
+            identity_manager=identity_mgr,
+        )
+        wechat_adapter.set_handler(engine.handle_message)
+
+    # 11. 启动
     logger.info("🌙 OpenKaguya 启动中...")
     await consciousness.start()
+    if wechat_adapter:
+        await wechat_adapter.start()
+        logger.info("📱 微信适配器已启动")
     try:
         await adapter.start()
     except KeyboardInterrupt:
@@ -137,6 +168,8 @@ async def run_cli():
     finally:
         await consciousness.stop()
         await adapter.stop()
+        if wechat_adapter:
+            await wechat_adapter.stop()
         if browser_toolkit:
             await browser_toolkit.close()
         await db.close()

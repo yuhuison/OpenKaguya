@@ -1,38 +1,55 @@
+2026-02-22 18:32:09.849 | INFO     | kaguya.core.identity:__init__:49 - 鐢ㄦ埛韬唤绠＄悊鍣ㄥ垵濮嬪寲: 2 涓敤鎴? 4 鏉℃槧灏?
+2026-02-22 18:32:09.864 | INFO     | kaguya.config:load_config:293 - 閰嶇疆鍔犺浇瀹屾垚: 涓绘ā鍨?moonshotai/kimi-k2.5, 娆＄骇妯″瀷=google/gemini-2.5-flash-lite-preview-09-2025
+2026-02-22 18:32:09.864 | INFO     | kaguya.config:load_config:295 - 鐢ㄦ埛韬唤: 1 涓凡娉ㄥ唽鐢ㄦ埛
+2026-02-22 18:32:10.225 | INFO     | kaguya.adapters.wechat:__init__:47 - 寰俊閫傞厤鍣ㄥ垵濮嬪寲: base_url=http://127.0.0.1:8099, 鐧藉悕鍗曠敤鎴?2, 鐧藉悕鍗曠兢缁?1
 
-[1] OpenAI Schema...
-    - read_file: 璇诲彇 workspace 涓殑鏂囦欢鍐呭銆?
-    - write_file: 鍦?workspace 涓垱寤烘垨瑕嗙洊鏂囦欢銆?
-    - list_files: 鍒楀嚭 workspace 涓殑鎵€鏈夋枃浠跺拰鐩綍銆?
-    - search_memory: 鎼滅储涓庢煇涓敤鎴风殑鍘嗗彶瀵硅瘽璁板繂銆傚綋浣犳兂鍥炲繂杩囧幓鑱婅繃鐨勪簨鎯呮椂浣跨敤銆?
-    - write_note: 鍦ㄤ綘鐨勭瑪璁版湰涓婂啓涓嬩竴鏉＄瑪璁般€傜敤浜庤褰曢噸瑕佷俊鎭€佹湁瓒ｇ殑鍙戠幇銆佺敤鎴风殑鍠滃ソ绛変綘涓嶆兂蹇樿鐨勪簨鎯呫€?
-    - read_notes: 鏌ョ湅浣犵殑绗旇鏈腑鐨勭瑪璁般€傚彲浠ユ悳绱㈢壒瀹氭爣绛炬垨鏌ョ湅鏈€杩戠殑绗旇銆?
-  OK: 6 涓伐鍏峰凡娉ㄥ唽
+[1] 鐢ㄦ埛韬唤绠＄悊鍣?..
+  OK: resolve wechat鈫抋lice
+  OK: resolve qq鈫抋lice
+  OK: resolve cli鈫抋lice
+  OK: resolve wechat鈫抌ob
+  OK: resolve 鏈敞鍐屸啋閫€鍖?
+  OK: alice nickname
+  OK: alice note
+  OK: alice role
+  OK: get_nickname alice
+  OK: get_nickname unknown+fallback
+  OK: user context 鍖呭惈鏄电О
+  OK: user context 鍖呭惈澶囨敞
+  OK: user context 鍖呭惈绠＄悊鍛?
+  OK: user context bob 鏃犵鐞嗗憳
+  OK: alice 3 涓钩鍙?ID
+  OK: get_platform_ids 鏈敞鍐?
 
-[2] 鐢ㄦ埛涓婁笅鏂?..
-  OK: 涓婁笅鏂囪缃垚鍔?
+[2] 閰嶇疆鍔犺浇...
+  OK: wechat config 瀛樺湪
+  OK: wechat enabled 绫诲瀷姝ｇ‘
+  OK: identity config 瀛樺湪
 
-[3] 鏂囦欢鍐欏叆...
-  OK: 鍐欏叆鎴愬姛
+[3] 寰俊娑堟伅瑙ｆ瀽...
+  OK: extract_str dict
+  OK: extract_str plain
+  OK: extract_str empty
+  OK: extract nickname 鑻辨枃鍐掑彿
+  OK: extract nickname 涓枃鍐掑彿
+  OK: extract nickname 鏃犲啋鍙?
 
-[4] 鏂囦欢璇诲彇...
-  OK: 璇诲彇鍐呭姝ｇ‘
+[4] 鐧藉悕鍗曡繃婊?..
+  OK: 鐢ㄦ埛鍦ㄧ櫧鍚嶅崟
+  OK: 鐢ㄦ埛涓嶅湪鐧藉悕鍗?
+  OK: 缇ゅ湪鐧藉悕鍗?
+  OK: 缇や笉鍦ㄧ櫧鍚嶅崟
 
-[5] 鏂囦欢鍒楄〃...
-  OK: 鍒楄〃鍖呭惈鏂囦欢
+[5] 鍙戦€佹秷鎭瀯閫?..
+  OK: alice 鍙嶅悜鏌ユ壘寰俊 ID
 
-[6] 璺緞绌胯秺闃叉姢...
-  OK: 绌胯秺琚嫤鎴?
-
-[7] 绗旇鏈?..
-  OK: 绗旇鍐欏叆鎴愬姛
-  OK: 绗旇璇诲彇鎴愬姛
-  OK: 鏍囩杩囨护鎴愬姛
-
-[10] 鏈煡宸ュ叿...
-  OK: 鏈煡宸ュ叿杩斿洖閿欒
+[6] 缇ゆ秷鎭В鏋?..
+  OK: 缇ゆ秷鎭媶鍒? sender
+  OK: 缇ゆ秷鎭媶鍒? content
+  OK: 缇ゆ秷鎭棤鎷嗗垎鏍囪
 
 ========================================
-  10 passed, 0 failed
+  33 passed, 0 failed
 ========================================
 
-All tests passed!
+All tests passed! 馃帀

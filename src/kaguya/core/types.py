@@ -38,6 +38,7 @@ class Attachment:
     local_path: Optional[str] = None  # 本地路径
     filename: Optional[str] = None  # 文件名
     mime_type: Optional[str] = None
+    data: Optional[str] = None  # base64 编码数据（如微信图片的 img_buf）
 
 
 @dataclass

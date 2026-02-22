@@ -34,6 +34,7 @@ class LLMModelConfig:
     temperature: float = 0.7
     max_tokens: int = 4096
     dimensions: Optional[int] = None  # Embedding 模型专用
+    reasoning_effort: Optional[str] = None  # "none" / "low" / "medium" / "high", None=模型默认
 
 
 @dataclass
@@ -79,6 +80,7 @@ class BrowserConfig:
     cloud_proxy_country: str = "us"
     cdp_url: str = ""
     headless: bool = True
+    api_key: str = ""  # Browser-Use Cloud API Key
 
 
 @dataclass
@@ -108,6 +110,35 @@ class PersonaConfig:
 
 
 @dataclass
+class WeChatConfig:
+    """微信 Adapter 配置"""
+
+    enabled: bool = False
+    base_url: str = "http://127.0.0.1:8099"
+    api_key: str = ""
+    whitelist_users: list[str] = field(default_factory=list)
+    whitelist_groups: list[str] = field(default_factory=list)
+
+
+@dataclass
+class UserIdentityEntry:
+    """一个用户的身份条目（配置层面）"""
+
+    id: str = ""
+    nickname: str = ""
+    note: str = ""
+    role: str = "friend"
+    accounts: list[str] = field(default_factory=list)
+
+
+@dataclass
+class IdentityConfig:
+    """用户身份配置"""
+
+    users: list[UserIdentityEntry] = field(default_factory=list)
+
+
+@dataclass
 class AppConfig:
     """应用总配置"""
 
@@ -117,6 +148,8 @@ class AppConfig:
     browser: BrowserConfig = field(default_factory=BrowserConfig)
     admin: AdminConfig = field(default_factory=AdminConfig)
     persona: PersonaConfig = field(default_factory=PersonaConfig)
+    wechat: WeChatConfig = field(default_factory=WeChatConfig)
+    identity: IdentityConfig = field(default_factory=IdentityConfig)
 
 
 def _deep_get(d: dict, *keys: str, default: Any = None) -> Any:
@@ -169,6 +202,7 @@ def load_config(
             api_key=_deep_get(secrets, "api_keys", "primary", default=""),
             temperature=_deep_get(defaults, "llm", "primary", "temperature", default=0.7),
             max_tokens=_deep_get(defaults, "llm", "primary", "max_tokens", default=4096),
+            reasoning_effort=_deep_get(defaults, "llm", "primary", "reasoning_effort", default=None),
         ),
         secondary=LLMModelConfig(
             provider=_deep_get(defaults, "llm", "secondary", "provider", default="openai"),
@@ -204,6 +238,27 @@ def load_config(
         ),
     )
 
+    # 构建 WeChat 配置
+    wechat_config = WeChatConfig(
+        enabled=_deep_get(defaults, "wechat", "enabled", default=False),
+        base_url=_deep_get(defaults, "wechat", "base_url", default="http://127.0.0.1:8099"),
+        api_key=_deep_get(secrets, "wechat", "api_key", default=""),
+        whitelist_users=_deep_get(defaults, "wechat", "whitelist_users", default=[]),
+        whitelist_groups=_deep_get(defaults, "wechat", "whitelist_groups", default=[]),
+    )
+
+    # 构建用户身份配置
+    identity_entries = []
+    for u in _deep_get(defaults, "identity", "users", default=[]):
+        identity_entries.append(UserIdentityEntry(
+            id=u.get("id", ""),
+            nickname=u.get("nickname", ""),
+            note=u.get("note", ""),
+            role=u.get("role", "friend"),
+            accounts=u.get("accounts", []),
+        ))
+    identity_config = IdentityConfig(users=identity_entries)
+
     config = AppConfig(
         llm=llm_config,
         memory=MemoryConfig(
@@ -227,6 +282,7 @@ def load_config(
             cloud_proxy_country=_deep_get(defaults, "browser", "cloud_proxy_country", default="us"),
             cdp_url=_deep_get(defaults, "browser", "cdp_url", default=""),
             headless=_deep_get(defaults, "browser", "headless", default=True),
+            api_key=_deep_get(secrets, "browser", "browser_use_api_key", default=""),
         ),
         admin=AdminConfig(
             enabled=_deep_get(defaults, "admin", "enabled", default=True),
@@ -234,7 +290,11 @@ def load_config(
             port=_deep_get(defaults, "admin", "port", default=8080),
         ),
         persona=persona_config,
+        wechat=wechat_config,
+        identity=identity_config,
     )
 
     logger.info(f"配置加载完成: 主模型={config.llm.primary.model}, 次级模型={config.llm.secondary.model}")
+    if identity_entries:
+        logger.info(f"用户身份: {len(identity_entries)} 个已注册用户")
     return config

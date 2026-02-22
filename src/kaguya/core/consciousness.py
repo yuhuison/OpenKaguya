@@ -25,6 +25,7 @@ class ConsciousnessScheduler:
     1. 周期性心跳唤醒（默认每 30 分钟，±5 分钟随机抖动）
     2. 静默时段控制（深夜不打扰用户）
     3. 唤醒时构建特殊 Prompt，让辉夜姬自主决定做什么
+    4. 动态注入待办任务和到期定时器
     """
 
     def __init__(
@@ -32,10 +33,12 @@ class ConsciousnessScheduler:
         config: AppConfig,
         chat_engine,  # ChatEngine, 避免循环导入
         send_callback=None,  # 发送消息给用户的回调
+        db=None,  # Database 实例，用于查询任务和定时器
     ):
         self.config = config
         self.chat_engine = chat_engine
         self.send_callback = send_callback  # async def callback(user_id, messages)
+        self.db = db
         self._lock = asyncio.Lock()
         self._running = False
         self._task: asyncio.Task | None = None
@@ -124,8 +127,8 @@ class ConsciousnessScheduler:
             try:
                 logger.info("🌅 辉夜姬醒来了...")
 
-                # 构建唤醒 Prompt
-                wake_prompt = self._build_wake_prompt()
+                # 构建唤醒 Prompt（含动态数据）
+                wake_prompt = await self._build_wake_prompt()
 
                 # 创建一个「系统唤醒」消息
                 wake_message = UnifiedMessage(
@@ -142,6 +145,9 @@ class ConsciousnessScheduler:
                 # 交给 ChatEngine 处理
                 replies = await self.chat_engine.handle_message(wake_message)
 
+                # 处理到期定时器
+                await self._handle_triggered_timers()
+
                 # 如果辉夜姬决定发送消息给用户
                 if replies and self.send_callback:
                     # 主动消息通过回调发送
@@ -155,8 +161,20 @@ class ConsciousnessScheduler:
             except Exception as e:
                 logger.error(f"唤醒过程出错: {e}")
 
-    def _build_wake_prompt(self) -> str:
-        """构建主动唤醒的 Prompt"""
+    async def _handle_triggered_timers(self) -> None:
+        """处理到期定时器"""
+        if not self.db:
+            return
+        try:
+            triggered = await self.db.get_triggered_timers()
+            for timer in triggered:
+                logger.info(f"⏰ 定时器到期: [{timer['name']}] {timer['action']}")
+                await self.db.deactivate_timer(timer["id"])
+        except Exception as e:
+            logger.error(f"处理定时器出错: {e}")
+
+    async def _build_wake_prompt(self) -> str:
+        """构建主动唤醒的 Prompt（含动态任务/定时器数据）"""
         now = datetime.now()
         time_str = now.strftime("%Y年%m月%d日 %H:%M")
 
@@ -175,18 +193,38 @@ class ConsciousnessScheduler:
         else:
             period = "晚上"
 
+        # 动态数据
+        tasks_section = ""
+        timers_section = ""
+
+        if self.db:
+            try:
+                tasks = await self.db.get_tasks(status="pending")
+                if tasks:
+                    task_lines = [f"  - [{t['id']}] {t['title']}" for t in tasks[:5]]
+                    tasks_section = "\n📝 你的待办任务:\n" + "\n".join(task_lines)
+
+                timers = await self.db.get_active_timers()
+                if timers:
+                    timer_lines = [f"  - {t['name']}: {t['action']} ({t.get('trigger_at', '无具体时间')})" for t in timers[:5]]
+                    timers_section = "\n⏰ 你的定时器:\n" + "\n".join(timer_lines)
+            except Exception as e:
+                logger.warning(f"查询任务/定时器失败: {e}")
+
         return f"""[系统唤醒 — 主动意识模式]
 
 当前时间: {time_str} ({period})
+{tasks_section}{timers_section}
 
 你醒来了。你现在有一段自由时间，可以做任何你想做的事情。
 
 以下是你可以考虑做的事情：
-1. 如果你想起了什么需要通知用户的事情，可以发消息
-2. 用浏览器上网看看新闻或有趣的东西
-3. 翻翻自己的笔记本，写写日记或记录灵感
-4. 在 workspace 里整理一下文件
-5. 什么都不想做的话，继续摸鱼也完全可以
+1. 检查待办任务和定时器，处理到期的事项
+2. 如果你想起了什么需要通知用户的事情，可以发消息
+3. 用浏览器上网看看新闻或有趣的东西
+4. 翻翻自己的笔记本，写写日记或记录灵感
+5. 在 workspace 里整理一下文件
+6. 什么都不想做的话，继续摸鱼也完全可以
 
 关于给用户发消息的原则：
 - 不要为了发消息而发消息

@@ -6,6 +6,9 @@
 
 from __future__ import annotations
 
+import asyncio
+import json
+
 from loguru import logger
 
 from kaguya.config import AppConfig
@@ -51,6 +54,9 @@ class ChatEngine:
         # 简易对话历史（Phase 0 仅内存存储，后续替换为 MemoryManager）
         self._histories: dict[str, list[dict]] = {}
 
+        # per-conversation 锁：保证同一对话的消息串行处理
+        self._locks: dict[str, asyncio.Lock] = {}
+
         logger.info(f"ChatEngine 初始化完成 (工具: {len(self.tool_registry.tool_names)}个)")
 
     def add_middleware(self, middleware: Middleware) -> None:
@@ -77,9 +83,16 @@ class ChatEngine:
 
 重要交互规则：
 1. 你必须通过且仅通过调用 `send_message_to_user` 工具来给用户发送回复。
-2. 你可以在一个回合内连续多次调用 `send_message_to_user`，用来发送多条消息（比如分段发送，避免长篇大论）。
+2. 你必须把回复拆成多条短消息，每条消息单独调用一次 `send_message_to_user`。就像用微信发消息一样，一条一条地发，绝对不要把所有话塞在一条消息里！
+   比如你想说"晚上好呀"和"今天过得怎么样"，就应该调用两次 `send_message_to_user`，第一次发"晚上好呀"，第二次发"今天过得怎么样"。
 3. 你的普通文本回复（content）只是你的内心思考过程，用户是绝对看不到的！
-4. 保持自然、有个性地说和思考，不要像个官方的AI助手。
+4. 你是在用手机和朋友发消息，不是在写作文！请严格遵守：
+   - 绝对禁止使用任何 Markdown 格式（不要用 **加粗**、*斜体*、# 标题、- 列表等）
+   - 一条消息最多一两句话，不要超过三句
+   - 用口语，别用书面语，别用"首先、其次、总之"这种词
+   - 可以用颜文字和 emoji，但别滥用，穿插着来
+   - 别自我介绍、别复述设定，正常人不会那样说话
+   - 可以打错字、用缩写、句子不完整，这样更自然
 """
 
     # send_message_to_user 工具定义
@@ -87,7 +100,7 @@ class ChatEngine:
         "type": "function",
         "function": {
             "name": "send_message_to_user",
-            "description": "向当前对话的用户发送一条消息。可多次调用发送多条消息。",
+            "description": "向用户发送一条短消息（一两句话）。想说多句话时，必须拆开多次调用此工具，每次只发一小段。",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -101,10 +114,18 @@ class ChatEngine:
         },
     }
 
-    async def handle_message(self, message: UnifiedMessage) -> list[str]:
+    async def handle_message(
+        self,
+        message: UnifiedMessage,
+        send_callback=None,
+    ) -> list[str]:
         """
         处理用户消息并返回回复列表。
-        群聊消息会检查 _skip_reply 标志（由 GroupFilterMiddleware 设置）。
+
+        Args:
+            message: 统一消息
+            send_callback: 即时发送回调 async def(text: str)
+                          如果提供，send_message_to_user 会立即通过此回调发送
         """
         user_id = message.sender.user_id
         user_name = message.sender.nickname
@@ -112,6 +133,28 @@ class ChatEngine:
         # 历史隔离 key：群聊按 group_id，私聊按 user_id
         history_key = message.group_id if message.is_group_message else user_id
 
+        # 获取 per-conversation 锁，保证同一对话串行处理
+        if history_key not in self._locks:
+            self._locks[history_key] = asyncio.Lock()
+        lock = self._locks[history_key]
+
+        try:
+            async with asyncio.timeout(120):  # 120 秒超时，防止异常情况永久卡死
+                async with lock:
+                    return await self._process_message(message, send_callback, user_id, user_name, history_key)
+        except TimeoutError:
+            logger.error(f"消息处理超时 (120s): user={user_id}, key={history_key}")
+            return []
+
+    async def _process_message(
+        self,
+        message: UnifiedMessage,
+        send_callback,
+        user_id: str,
+        user_name: str,
+        history_key: str,
+    ) -> list[str]:
+        """实际的消息处理逻辑（在 lock 保护下执行）"""
         # 获取对话历史
         if history_key not in self._histories:
             self._histories[history_key] = []
@@ -145,8 +188,24 @@ class ChatEngine:
         limit = self.config.memory.short_term_limit * 2  # user+assistant 成对
         messages.extend(history[-limit:])
 
-        # 添加当前用户消息（群聊标注发言者，私聊也标注）
-        user_msg = {"role": "user", "content": f"[{user_name}]: {message.content}"}
+        # 添加当前用户消息（支持多模态：文本 + 图片）
+        text_content = f"[{user_name}]: {message.content}"
+        image_attachments = [
+            a for a in message.attachments if a.type == "image" and a.data
+        ]
+
+        if image_attachments:
+            # OpenAI vision 多模态格式
+            content_parts = [{"type": "text", "text": text_content}]
+            for att in image_attachments:
+                mime = att.mime_type or "image/jpeg"
+                content_parts.append({
+                    "type": "image_url",
+                    "image_url": {"url": f"data:{mime};base64,{att.data}"},
+                })
+            user_msg = {"role": "user", "content": content_parts}
+        else:
+            user_msg = {"role": "user", "content": text_content}
         messages.append(user_msg)
 
         tools = [self.SEND_MESSAGE_TOOL] + self.tool_registry.get_openai_tools()
@@ -157,7 +216,7 @@ class ChatEngine:
         context_messages = list(messages)
         
         # === 2. 工具调用循环 (最多允许 5 次连续交互) ===
-        MAX_ITERATIONS = 5
+        MAX_ITERATIONS = 15
         assistant_thinking_logs = []
 
         for i in range(MAX_ITERATIONS):
@@ -182,26 +241,44 @@ class ChatEngine:
 
                 # 如果没有工具调用，说明思考完毕且不打算再做操作
                 if not tool_calls:
-                    # 兼容不支持 function calling 的情况
+                    # 兼容不支持 function calling 的情况：
+                    # 如果 LLM 直接在 content 里写了回复而不调用工具
                     if not reply_messages and thinking:
                         reply_messages.append(thinking)
+                        # 也要通过 send_callback 发出去
+                        if send_callback:
+                            try:
+                                await send_callback(thinking)
+                            except Exception as e:
+                                logger.error(f"回退发送失败: {e}")
                     break
 
                 # === 3. 执行工具调用 ===
+                has_non_send_tool = False
                 for tc in tool_calls:
                     tc_id = tc["id"]
                     tc_name = tc["name"]
                     tc_args = tc["arguments"]
 
+                    logger.debug(f"🔧 工具调用: {tc_name}({tc_args})")
+
                     if tc_name == "send_message_to_user":
-                        # 特殊处理：收集回复
                         content = tc_args.get("content", "")
                         if content:
                             reply_messages.append(content)
+                            # 即时发送（如果有回调）
+                            if send_callback:
+                                try:
+                                    await send_callback(content)
+                                except Exception as e:
+                                    logger.error(f"即时发送失败: {e}")
                         tool_result_content = "Message sent to user successfully."
                     else:
                         # 通过 ToolRegistry 分发执行
+                        has_non_send_tool = True
                         tool_result_content = await self.tool_registry.execute(tc_name, tc_args)
+
+                    logger.debug(f"🔧 工具结果: {tc_name} → {str(tool_result_content)[:500]}")
                     
                     # 将工具执行结果记录到上下文
                     context_messages.append({
@@ -210,6 +287,10 @@ class ChatEngine:
                         "content": tool_result_content
                     })
 
+                # 如果这一轮全是发消息的调用，不需要再请求 LLM，直接结束
+                if not has_non_send_tool:
+                    break
+
             except Exception as e:
                 logger.error(f"LLM 调用失败: {e}")
                 if not reply_messages:
@@ -217,12 +298,39 @@ class ChatEngine:
                 break
 
         # === 4. 更新对话历史 ===
-        history.append(user_msg)
+        # 保存用户消息到历史（如果是多模态消息，去掉 base64 图片数据以节省 token）
+        if image_attachments:
+            img_desc = f"[附带了{len(image_attachments)}张图片]"
+            history_user_msg = {"role": "user", "content": f"{text_content} {img_desc}"}
+        else:
+            history_user_msg = user_msg
+        history.append(history_user_msg)
         if reply_messages:
+            # 以 tool_calls 格式保存 assistant 回复，这样 LLM 学到的范式
+            # 是"通过调用 send_message_to_user 工具来回复"，而不是直接写 content
+            import uuid as _uuid
+            fake_tool_calls = []
+            tool_results = []
+            for text in reply_messages:
+                tc_id = f"call_{_uuid.uuid4().hex[:8]}"
+                fake_tool_calls.append({
+                    "id": tc_id,
+                    "type": "function",
+                    "function": {
+                        "name": "send_message_to_user",
+                        "arguments": json.dumps({"content": text}, ensure_ascii=False),
+                    },
+                })
+                tool_results.append({
+                    "role": "tool",
+                    "tool_call_id": tc_id,
+                    "content": "Message sent to user successfully.",
+                })
             history.append({
                 "role": "assistant",
-                "content": "\n\n".join(assistant_thinking_logs) or ""
+                "tool_calls": fake_tool_calls,
             })
+            history.extend(tool_results)
             
         # === 5. 执行后置中间件 ===
         for mw in self.middlewares:

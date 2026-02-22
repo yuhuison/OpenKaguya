@@ -4,10 +4,9 @@
 # 主模型：用于生成回复、执行工具调用、执行复杂逻辑
 provider = "openai"
 base_url = "https://openrouter.ai/api/v1"
-model = "z-ai/glm-5:nitro"
+model = "moonshotai/kimi-k2.5"
 temperature = 0.7
 max_tokens = 8192
-reasoning_effort = "none"
 
 [llm.secondary]
 # 次级模型：用于总结、提取信息等纯文本任务
@@ -59,19 +58,19 @@ port = 8080
 
 [wechat]
 # 微信 Adapter (wechat-v864)
-enabled = true
-base_url = "http://open-kaguya.tech:8099"
+enabled = false
+base_url = "http://127.0.0.1:8099"
 # 白名单：只处理这些微信 ID / 群的消息
-whitelist_users  = ["wxid_19dqn48qw92m22"]   # 如 ["wxid_alice123", "wxid_bob456"]
+whitelist_users  = []   # 如 ["wxid_alice123", "wxid_bob456"]
 whitelist_groups = []   # 如 ["12345678@chatroom"]
 
 # ===== 跨平台用户身份注册表 =====
 # 每个 [[identity.users]] 定义辉夜姬认识的一个人
 # accounts 格式: "平台:原始ID"（如 "wechat:wxid_xxx", "qq:12345"）
 
-[[identity.users]]
-id       = "micks"
-nickname = "秋小十/Micks"
-note     = "open-kaguya开发者，INFP，喜欢各种有趣的事物，男生"
-role     = "admin"    # admin / friend / acquaintance
-accounts = ["wechat:wxid_19dqn48qw92m22"]
+# [[identity.users]]
+# id       = "alice"
+# nickname = "小爱"
+# note     = "喜欢猫和咖啡，CS 专业大三"
+# role     = "admin"    # admin / friend / acquaintance
+# accounts = ["wechat:wxid_alice123", "qq:12345678", "cli:local_user"]

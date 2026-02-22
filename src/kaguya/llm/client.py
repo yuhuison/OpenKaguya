@@ -26,6 +26,10 @@ class LLMClient:
             api_key=config.api_key,
             base_url=config.base_url,
         )
+        # 累计 Token 用量统计
+        self.total_prompt_tokens = 0
+        self.total_completion_tokens = 0
+        self.total_requests = 0
         logger.info(f"LLM 客户端 [{name}] 初始化: model={config.model}, base_url={config.base_url}")
 
     async def chat(
@@ -54,6 +58,10 @@ class LLMClient:
             "max_tokens": max_tokens or self.config.max_tokens,
         }
 
+        # 控制 reasoning/thinking（通过 extra_body 传递给 OpenRouter 等兼容 API）
+        if self.config.reasoning_effort is not None:
+            kwargs["extra_body"] = {"reasoning": {"effort": self.config.reasoning_effort}}
+
         if tools:
             kwargs["tools"] = tools
             kwargs["tool_choice"] = "auto"
@@ -61,14 +69,17 @@ class LLMClient:
         try:
             response = await self._client.chat.completions.create(**kwargs)
 
-            # 统计 token 用量
             usage = response.usage
             if usage:
+                self.total_prompt_tokens += usage.prompt_tokens
+                self.total_completion_tokens += usage.completion_tokens
+                self.total_requests += 1
                 logger.debug(
                     f"[{self.name}] Token 用量: "
                     f"prompt={usage.prompt_tokens}, "
                     f"completion={usage.completion_tokens}, "
-                    f"total={usage.total_tokens}"
+                    f"total={usage.total_tokens} "
+                    f"(累计: {self.total_prompt_tokens + self.total_completion_tokens})"
                 )
 
             choice = response.choices[0]
