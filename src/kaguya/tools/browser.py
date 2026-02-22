@@ -223,9 +223,13 @@ class BrowserRunTaskTool(Tool):
             return final or "任务已完成，但无返回结果"
 
         except ImportError:
-            return "错误：browser_use 未安装或不支持 Agent 模式"
+            return (
+                "browser_task 不可用（browser-use 或 langchain-openai 未安装）。"
+                "如果你只是想搜索信息，请改用 web_search 工具；"
+                "如果需要手动浏览网页，可以用 browser_open + browser_get_text。"
+            )
         except Exception as e:
-            return f"浏览器任务执行失败: {e}"
+            return f"浏览器任务执行失败: {e}。如果只是搜索信息，建议改用 web_search 工具。"
 
 
 class BrowserOpenTool(Tool):
@@ -252,6 +256,14 @@ class BrowserOpenTool(Tool):
         try:
             page = await self._tk._ensure_page()
             await page.goto(url)
+            # 刷新 page 引用（cloud 模式下 goto 后可能切换了内部 tab）
+            try:
+                fresh = await self._tk._browser.get_current_page()
+                if fresh:
+                    self._tk._page = fresh
+                    page = fresh
+            except Exception:
+                pass
             title = await page.get_title()
             current_url = await page.get_url()
             return f"已打开页面: {title}\nURL: {current_url}"
