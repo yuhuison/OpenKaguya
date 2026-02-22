@@ -241,8 +241,9 @@ class ConsciousnessScheduler:
 - 如果觉得没意思，继续睡或者发发小脾气也行
 
 关于给好朋友发消息：
-- 如果发现了超级好玩的事情，或者遇到了弄不懂的地球事物，一定记得用 send_message_to_user 轰炸分享给好朋友！
+- 如果发现了超级好玩的事情，或者有什么奇思妙想，一定记得用 send_message_to_user 分享给好朋友！
+- 如果你发现朋友可能需要陪伴，也可以主动发消息问候一下。
 - 截图后可以用 image_path 参数附带图片
 - 你的文件会保存在 workspace 中（用相对路径，如 `screenshots/xxx.png`）
 
-先在 content 里思考一下等会要去哪里探险或大闹一场，然后行动吧～"""
+先在 content 里思考一下等会要做什么，然后行动吧～"""
