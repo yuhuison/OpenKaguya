@@ -165,9 +165,14 @@ async def run_cli():
         db=db,
     )
 
-    # 10. 初始化 CLI 适配器
-    adapter = CLIAdapter()
-    adapter.set_handler(engine.handle_message)
+    # 10. 初始化 CLI 适配器（仅交互模式）
+    import sys
+    is_interactive = sys.stdin.isatty()
+
+    adapter = None
+    if is_interactive:
+        adapter = CLIAdapter()
+        adapter.set_handler(engine.handle_message)
 
     # 11. 启动
     logger.info("🌙 OpenKaguya 启动中...")
@@ -175,13 +180,26 @@ async def run_cli():
     if wechat_adapter:
         await wechat_adapter.start()
         logger.info("📱 微信适配器已启动")
+
     try:
-        await adapter.start()
+        if is_interactive and adapter:
+            # 交互模式：CLI 适配器运行直到用户输入 /quit 或 Ctrl+C
+            await adapter.start()
+        else:
+            # 守护进程模式（systemd）：挂起等待 SIGTERM / SIGINT
+            import signal
+            stop_event = asyncio.Event()
+            loop = asyncio.get_running_loop()
+            for sig in (signal.SIGTERM, signal.SIGINT):
+                loop.add_signal_handler(sig, stop_event.set)
+            logger.info("🌙 守护进程模式运行中，等待 SIGTERM 信号退出")
+            await stop_event.wait()
     except KeyboardInterrupt:
         pass
     finally:
         await consciousness.stop()
-        await adapter.stop()
+        if adapter:
+            await adapter.stop()
         if wechat_adapter:
             await wechat_adapter.stop()
         if browser_toolkit:
