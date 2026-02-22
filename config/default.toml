@@ -1,0 +1,57 @@
+# OpenKaguya 默认配置
+
+[llm.primary]
+# 主模型：用于生成回复、执行工具调用、执行复杂逻辑
+provider = "openai"
+base_url = "https://openrouter.ai/api/v1"
+model = "moonshotai/kimi-k2.5"
+temperature = 0.7
+max_tokens = 8192
+
+[llm.secondary]
+# 次级模型：用于总结、提取信息等纯文本任务
+provider = "openai"
+base_url = "https://openrouter.ai/api/v1"
+model = "google/gemini-2.5-flash-lite-preview-09-2025"
+temperature = 0.3
+max_tokens = 8192
+
+[llm.embedding]
+# 向量化模型
+provider = "openai"
+base_url = "https://openrouter.ai/api/v1"
+model = "qwen/qwen3-embedding-8b"
+dimensions = 4096
+
+[memory]
+# 临时记忆：最近 N 条消息
+short_term_limit = 10
+# 累计多少条未向量化消息后触发向量化
+vectorize_threshold = 10
+# 日志检索：最近 N 小时
+log_hours = 24
+# RAG 检索 top-k
+retrieval_top_k = 5
+
+[consciousness]
+# 主动意识调度
+enabled = true
+heartbeat_interval_minutes = 30
+jitter_seconds = 300
+# 静默时段（不主动打扰用户）
+quiet_hours_start = "23:00"
+quiet_hours_end = "08:00"
+
+[browser]
+# 浏览器模式: "local" / "cloud" / "cdp"
+mode = "cloud"
+chrome_path = ""
+cloud_proxy_country = "us"
+cdp_url = ""
+headless = true
+
+[admin]
+# 管理面板
+enabled = true
+host = "127.0.0.1"
+port = 8080
