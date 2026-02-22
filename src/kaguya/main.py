@@ -126,6 +126,18 @@ async def run_cli():
         tool_registry.register_all(browser_toolkit.get_tools())
         logger.info(f"浏览器工具已注册 (模式: {config.browser.mode})")
 
+    # 6c. 初始化网络搜索工具（Exa / Tavily，二选一）
+    from kaguya.config import CONFIG_DIR, _load_toml
+    _secrets = _load_toml(CONFIG_DIR / "secrets.toml")
+    _exa_key = (_secrets.get("exa") or {}).get("api_key", "")
+    _tavily_key = (_secrets.get("tavily") or {}).get("api_key", "")
+    if _exa_key or _tavily_key:
+        from kaguya.tools.web_search import create_web_search_tools
+        web_tools = create_web_search_tools(exa_api_key=_exa_key, tavily_api_key=_tavily_key)
+        if web_tools:
+            tool_registry.register_all(web_tools)
+            logger.info(f"🔍 网络搜索工具已注册 ({web_tools[0]._backend.provider_name})")
+
     # 7. 初始化用户身份管理器
     from kaguya.core.identity import UserIdentityManager, UserIdentity
 
