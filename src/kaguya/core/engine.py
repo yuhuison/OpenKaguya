@@ -200,6 +200,16 @@ class ChatEngine:
 
         # === 1. 构建初始请求 Context ===
         base_system = self._system_prompt
+        
+        # 动态注入环境信息
+        import platform
+        from datetime import datetime
+        now = datetime.now()
+        time_str = now.strftime("%Y年%m月%d日 %H:%M:%S")
+        weekday = ["一", "二", "三", "四", "五", "六", "日"][now.weekday()]
+        os_info = f"{platform.system()} {platform.release()}"
+        base_system += f"\n\n【当前环境】\n时间: {time_str} (星期{weekday})\n系统: {os_info}"
+
         if extra_system_prompts:
             base_system += "\n\n【系统附加信息】\n" + "\n".join(extra_system_prompts)
             
@@ -210,7 +220,8 @@ class ChatEngine:
         messages.extend(history[-limit:])
 
         # 添加当前用户消息（支持多模态：文本 + 图片）
-        text_content = f"[{user_name}]: {message.content}"
+        msg_time = message.timestamp.strftime("%H:%M:%S")
+        text_content = f"[{msg_time}] [{user_name}]: {message.content}"
         image_attachments = [
             a for a in message.attachments if a.type == "image" and a.data
         ]

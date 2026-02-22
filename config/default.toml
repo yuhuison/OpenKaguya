@@ -3,8 +3,8 @@
 [llm.primary]
 # 主模型：用于生成回复、执行工具调用、执行复杂逻辑
 provider = "openai"
-base_url = "https://openrouter.ai/api/v1"
-model = "z-ai/glm-5:nitro"
+base_url = "https://coding-intl.dashscope.aliyuncs.com/v1"
+model = "kimi-k2.5"
 temperature = 0.7
 max_tokens = 8192
 reasoning_effort = "none"
