@@ -191,50 +191,64 @@ class RunTerminalTool(Tool):
             return f"命令执行失败: {e}"
 
 
-# ========================= 记忆工具 =========================
+# ========================= 图片查看工具 =========================
 
 
-class SearchMemoryTool(Tool):
-    """主动搜索历史记忆"""
+class ViewImageTool(Tool):
+    """
+    让辉夜姬查看存储在 workspace/.images/ 中的图片。
 
-    def __init__(self, retriever):
-        self._retriever = retriever
+    当 AI 在历史中看到 [workspace_image:user_id:filename] 时，
+    可以主动调用此工具来加载图片内容进行查看。
+    """
+
+    def __init__(self, workspace: WorkspaceManager):
+        self._workspace = workspace
         self._current_user_id: str = ""
 
     @property
-    def name(self): return "search_memory"
+    def name(self): return "view_image"
 
     @property
     def description(self):
-        return "搜索与某个用户的历史对话记忆。当你想回忆过去聊过的事情时使用。"
+        return (
+            "查看保存在 workspace 中的图片。如果你在对话历史中看到 [workspace_image:user_id:filename] 占位符，"
+            "可以用此工具加载图片实际内容来查看。若不指定 user_id，默认使用当前对话用户。"
+        )
 
     @property
     def parameters(self):
         return {
             "type": "object",
             "properties": {
-                "query": {"type": "string", "description": "搜索关键词或问题"},
+                "filename": {
+                    "type": "string",
+                    "description": "图片文件名（如 abc123def456.jpg），从 [workspace_image:user_id:filename] 中提取",
+                },
+                "user_id": {
+                    "type": "string",
+                    "description": "图片所属用户 ID（可选，默认当前用户）",
+                },
             },
-            "required": ["query"],
+            "required": ["filename"],
         }
 
-    async def execute(self, query: str, **_) -> str:
-        results = await self._retriever.retrieve(
-            user_id=self._current_user_id,
-            query=query,
-            top_k=5,
-        )
-        if not results:
-            return "没有找到相关的历史记忆。"
+    async def execute(self, filename: str, user_id: str = "", **_) -> str | list:
+        uid = user_id or self._current_user_id
+        result = self._workspace.read_image_as_base64(uid, filename)
+        if not result:
+            return f"图片 {filename} 不存在（user_id={uid}）"
+        b64, mime = result
+        # 返回 multimodal 格式，engine 会直接将其作为 tool result content
+        # 注意：OpenAI tool message 支持 content 为 list（含 image_url 块）
+        return [
+            {"type": "text", "text": f"图片 {filename} 已加载："},
+            {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}},
+        ]
 
-        lines = ["找到以下相关记忆:"]
-        for m in results:
-            role = "用户" if m["role"] == "user" else "你"
-            content = m.get("display_content") or m["content"]
-            if len(content) > 200:
-                content = content[:200] + "..."
-            lines.append(f"  [{m['created_at']}] {role}: {content}")
-        return "\n".join(lines)
+
+# ========================= 消息查询工具 =========================
+
 
 
 class QueryMessagesTool(Tool):
@@ -271,39 +285,6 @@ class QueryMessagesTool(Tool):
             if len(content) > 150:
                 content = content[:150] + "..."
             lines.append(f"  [{m['created_at']}] {role}: {content}")
-        return "\n".join(lines)
-
-
-class QueryLogsTool(Tool):
-    """查询日志摘要"""
-
-    def __init__(self, db: Database):
-        self._db = db
-        self._current_user_id: str = ""
-
-    @property
-    def name(self): return "query_logs"
-
-    @property
-    def description(self):
-        return "查询对话日志摘要（自动生成的对话总结）。"
-
-    @property
-    def parameters(self):
-        return {
-            "type": "object",
-            "properties": {
-                "limit": {"type": "integer", "description": "返回条数（默认 5）"},
-            },
-        }
-
-    async def execute(self, limit: int = 5, **_) -> str:
-        logs = await self._db.get_daily_logs(self._current_user_id, limit)
-        if not logs:
-            return "没有日志摘要。"
-        lines = ["📋 对话日志摘要:"]
-        for log in logs:
-            lines.append(f"  [{log['created_at']}] {log['summary']}")
         return "\n".join(lines)
 
 
@@ -349,52 +330,26 @@ class ReadNotesTool(Tool):
     def __init__(self, db: Database):
         self._db = db
 
-    @property
-    def name(self): return "read_notes"
-
-    @property
-    def description(self):
-        return "查看你的笔记本中的笔记。可以搜索特定标签或查看最近的笔记。"
-
-    @property
-    def parameters(self):
-        return {
-            "type": "object",
-            "properties": {
-                "tag": {"type": "string", "description": "按标签过滤（可选）"},
-                "limit": {"type": "integer", "description": "最多返回几条（默认 5）"},
-            },
-        }
-
-    async def execute(self, tag: str = "", limit: int = 5, **_) -> str:
-        rows = await self._db.get_notes(tag or None, limit)
-        if not rows:
-            return "笔记本是空的。"
-        lines = ["📒 你的笔记:"]
-        for r in rows:
-            header = f"  [{r['created_at']}] {r['title'] or '(无标题)'}"
-            if r['tags']:
-                header += f" #{r['tags']}"
-            lines.append(header)
-            lines.append(f"    {r['content'][:200]}")
-        return "\n".join(lines)
+# ========================= 笔记本工具 =========================
 
 
-# ========================= 任务管理工具 =========================
-
-
-class ManageTasksTool(Tool):
-    """管理待办任务"""
+class ManageNotesTool(Tool):
+    """辉夜姬的笔记本管理工具（支持为自己或用户创建/读取/追加/删除笔记）"""
 
     def __init__(self, db: Database):
         self._db = db
+        self._current_user_id: str = ""  # 当前对话用户，用于 owner 参数默认值
 
     @property
-    def name(self): return "manage_tasks"
+    def name(self): return "manage_notes"
 
     @property
     def description(self):
-        return "管理你的待办任务列表。可以添加、查看、更新状态或删除任务。"
+        return (
+            "管理笔记本。支持创建、查看列表、读取内容、追加内容、删除笔记。"
+            "每条笔记属于一个 owner：'kaguya'（你自己的私人笔记）或某个用户ID（为该用户记录的信息）。"
+            "write 用于创建新笔记，append 用于在已有笔记后追加内容，read 用于读取某条笔记的完整内容。"
+        )
 
     @property
     def parameters(self):
@@ -403,117 +358,102 @@ class ManageTasksTool(Tool):
             "properties": {
                 "action": {
                     "type": "string",
-                    "enum": ["add", "list", "update", "delete"],
-                    "description": "操作类型",
+                    "enum": ["write", "list", "read", "append", "delete"],
+                    "description": (
+                        "操作类型：\n"
+                        "- write: 创建新笔记\n"
+                        "- list: 列出指定 owner 的所有笔记标题\n"
+                        "- read: 读取某条笔记的完整内容（需要 note_id）\n"
+                        "- append: 向已有笔记追加内容（需要 note_id 和 content）\n"
+                        "- delete: 删除某条笔记（需要 note_id）"
+                    ),
                 },
-                "title": {"type": "string", "description": "任务标题（add 时必填）"},
-                "description": {"type": "string", "description": "任务描述"},
-                "task_id": {"type": "integer", "description": "任务 ID（update/delete 时必填）"},
-                "status": {"type": "string", "enum": ["pending", "in_progress", "done", "cancelled"], "description": "新状态（update 时必填）"},
-                "priority": {"type": "integer", "description": "优先级（0-10，默认 0）"},
-            },
-            "required": ["action"],
-        }
-
-    async def execute(self, action: str, **kwargs) -> str:
-        if action == "add":
-            title = kwargs.get("title", "未命名任务")
-            desc = kwargs.get("description", "")
-            priority = kwargs.get("priority", 0)
-            task_id = await self._db.save_task(title, desc, priority)
-            return f"任务已创建 (ID: {task_id}): {title}"
-
-        elif action == "list":
-            status = kwargs.get("status")
-            tasks = await self._db.get_tasks(status)
-            if not tasks:
-                return "没有待办任务。"
-            lines = ["📝 任务列表:"]
-            for t in tasks:
-                emoji = {"pending": "⬜", "in_progress": "🔄", "done": "✅", "cancelled": "❌"}.get(t["status"], "⬜")
-                lines.append(f"  {emoji} [{t['id']}] {t['title']} (优先级: {t['priority']})")
-                if t["description"]:
-                    lines.append(f"      {t['description'][:100]}")
-            return "\n".join(lines)
-
-        elif action == "update":
-            task_id = kwargs.get("task_id")
-            status = kwargs.get("status")
-            if not task_id or not status:
-                return "需要 task_id 和 status 参数。"
-            await self._db.update_task_status(task_id, status)
-            return f"任务 {task_id} 状态已更新为 {status}"
-
-        elif action == "delete":
-            task_id = kwargs.get("task_id")
-            if not task_id:
-                return "需要 task_id 参数。"
-            await self._db.delete_task(task_id)
-            return f"任务 {task_id} 已删除"
-
-        return f"未知操作: {action}"
-
-
-# ========================= 技能管理工具 =========================
-
-
-class ManageSkillsTool(Tool):
-    """管理技能列表"""
-
-    def __init__(self, db: Database):
-        self._db = db
-
-    @property
-    def name(self): return "manage_skills"
-
-    @property
-    def description(self):
-        return "管理你的技能列表。可以添加新技能、查看已有技能或删除技能。"
-
-    @property
-    def parameters(self):
-        return {
-            "type": "object",
-            "properties": {
-                "action": {
+                "owner": {
                     "type": "string",
-                    "enum": ["add", "list", "delete"],
-                    "description": "操作类型",
+                    "description": (
+                        "笔记归属：'kaguya' 表示你自己的私人笔记，"
+                        "或填写用户ID表示关于该用户的笔记（默认 'kaguya'）"
+                    ),
                 },
-                "name": {"type": "string", "description": "技能名称（add/delete 时必填）"},
-                "description": {"type": "string", "description": "技能描述（add 时必填）"},
-                "trigger_keywords": {"type": "string", "description": "触发关键词（逗号分隔）"},
+                "title": {
+                    "type": "string",
+                    "description": "笔记标题（write 时使用）",
+                },
+                "content": {
+                    "type": "string",
+                    "description": "笔记内容（write 时为初始内容，append 时为要追加的内容）",
+                },
+                "tags": {
+                    "type": "string",
+                    "description": "标签（逗号分隔，write 时可选）",
+                },
+                "note_id": {
+                    "type": "integer",
+                    "description": "笔记 ID（read/append/delete 时必填）",
+                },
             },
             "required": ["action"],
         }
 
     async def execute(self, action: str, **kwargs) -> str:
-        if action == "add":
-            name = kwargs.get("name", "")
-            desc = kwargs.get("description", "")
-            keywords = kwargs.get("trigger_keywords", "")
-            if not name or not desc:
-                return "需要 name 和 description 参数。"
-            await self._db.save_skill(name, desc, keywords)
-            return f"技能已添加: {name}"
+        owner = kwargs.get("owner", "kaguya")
+
+        if action == "write":
+            title = kwargs.get("title", "")
+            content = kwargs.get("content", "")
+            tags = kwargs.get("tags", "")
+            if not content:
+                return "需要 content 参数。"
+            note_id = await self._db.save_note(title, content, tags, owner_id=owner)
+            return f"笔记已保存 (ID: {note_id}, owner: {owner}): {title or '(无标题)'}"
 
         elif action == "list":
-            skills = await self._db.get_skills()
-            if not skills:
-                return "还没有任何技能。"
-            lines = ["🎯 技能列表:"]
-            for s in skills:
-                lines.append(f"  • {s['name']}: {s['description'][:80]}")
-                if s["trigger_keywords"]:
-                    lines.append(f"    关键词: {s['trigger_keywords']}")
+            notes = await self._db.get_notes_by_owner(owner)
+            if not notes:
+                return f"没有属于 {owner} 的笔记。"
+            lines = [f"📒 {owner} 的笔记列表："]
+            for n in notes:
+                tag_str = f" #{n['tags']}" if n.get("tags") else ""
+                lines.append(f"  [ID:{n['id']}] {n['title'] or '(无标题)'}{tag_str}（{n['updated_at'][:16]}）")
             return "\n".join(lines)
 
+        elif action == "read":
+            note_id = kwargs.get("note_id")
+            if not note_id:
+                return "需要 note_id 参数。"
+            note = await self._db.get_note_by_id(int(note_id))
+            if not note:
+                return f"笔记 ID:{note_id} 不存在。"
+            tag_str = f"\n标签：{note['tags']}" if note.get("tags") else ""
+            return (
+                f"📒 笔记 [ID:{note['id']}]\n"
+                f"标题：{note['title'] or '(无标题)'}\n"
+                f"归属：{note['owner_id']}"
+                f"{tag_str}\n"
+                f"更新于：{note['updated_at']}\n\n"
+                f"{note['content']}"
+            )
+
+        elif action == "append":
+            note_id = kwargs.get("note_id")
+            content = kwargs.get("content", "")
+            if not note_id:
+                return "需要 note_id 参数。"
+            if not content:
+                return "需要 content 参数（要追加的内容）。"
+            ok = await self._db.append_note_content(int(note_id), content)
+            if ok:
+                return f"笔记 ID:{note_id} 已追加内容（{len(content)} 字符）"
+            return f"笔记 ID:{note_id} 不存在或更新失败。"
+
         elif action == "delete":
-            name = kwargs.get("name", "")
-            if not name:
-                return "需要 name 参数。"
-            await self._db.delete_skill(name)
-            return f"技能已删除: {name}"
+            note_id = kwargs.get("note_id")
+            if not note_id:
+                return "需要 note_id 参数。"
+            ok = await self._db.delete_note(int(note_id))
+            if ok:
+                return f"笔记 ID:{note_id} 已删除。"
+            return f"笔记 ID:{note_id} 不存在。"
 
         return f"未知操作: {action}"
 
@@ -589,26 +529,21 @@ class SetTimerTool(Tool):
 def create_builtin_tools(
     workspace: WorkspaceManager,
     db: Database,
-    retriever,
 ) -> list[Tool]:
     """创建所有内置工具"""
-    tools = [
+    return [
         # 文件工具
         ReadFileTool(workspace),
         WriteFileTool(workspace),
         DeleteFileTool(workspace),
         ListFilesTool(workspace),
         RunTerminalTool(workspace),
-        # 记忆工具
-        SearchMemoryTool(retriever),
+        # 图片查看
+        ViewImageTool(workspace),
+        # 消息查询
         QueryMessagesTool(db),
-        QueryLogsTool(db),
-        # 笔记本
-        WriteNoteTool(db),
-        ReadNotesTool(db),
-        # 任务 & 技能 & 定时器
-        ManageTasksTool(db),
-        ManageSkillsTool(db),
+        # 笔记本（统一工具）
+        ManageNotesTool(db),
+        # 定时器
         SetTimerTool(db),
     ]
-    return tools

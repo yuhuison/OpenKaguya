@@ -4,6 +4,8 @@ Workspace 沙箱管理器 — 文件操作隔离与路径穿越保护。
 
 from __future__ import annotations
 
+import base64
+import uuid
 from pathlib import Path
 
 from loguru import logger
@@ -86,3 +88,63 @@ class WorkspaceManager:
             if p.is_file():
                 files.append(str(p.relative_to(workspace)))
         return files
+
+    def save_image(
+        self,
+        user_id: str,
+        data: str | bytes,
+        mime_type: str = "image/jpeg",
+    ) -> str:
+        """
+        将图片保存到 workspace/.images/ 目录。
+
+        Args:
+            user_id: 用户 ID（用于确定存储位置）
+            data: base64 字符串或原始字节
+            mime_type: MIME 类型
+
+        Returns:
+            filename（不含目录），如 "abc123.jpg"
+        """
+        ext = {
+            "image/jpeg": "jpg",
+            "image/png": "png",
+            "image/gif": "gif",
+            "image/webp": "webp",
+        }.get(mime_type, "jpg")
+
+        images_dir = self.get_user_workspace(user_id) / ".images"
+        images_dir.mkdir(exist_ok=True)
+
+        filename = f"{uuid.uuid4().hex[:12]}.{ext}"
+        filepath = images_dir / filename
+
+        if isinstance(data, str):
+            # base64 字符串
+            raw = base64.b64decode(data)
+        else:
+            raw = data
+
+        filepath.write_bytes(raw)
+        logger.debug(f"图片已保存: {filepath}")
+        return filename
+
+    def get_image_path(self, user_id: str, filename: str) -> Path | None:
+        """根据文件名获取图片的完整路径，不存在则返回 None"""
+        filepath = self.get_user_workspace(user_id) / ".images" / filename
+        return filepath if filepath.exists() else None
+
+    def read_image_as_base64(self, user_id: str, filename: str) -> tuple[str, str] | None:
+        """
+        读取图片并返回 (base64_str, mime_type)，文件不存在则返回 None。
+        """
+        filepath = self.get_image_path(user_id, filename)
+        if not filepath:
+            return None
+        ext = filepath.suffix.lower().lstrip(".")
+        mime = {
+            "jpg": "image/jpeg", "jpeg": "image/jpeg",
+            "png": "image/png", "gif": "image/gif", "webp": "image/webp",
+        }.get(ext, "image/jpeg")
+        b64 = base64.b64encode(filepath.read_bytes()).decode("utf-8")
+        return b64, mime

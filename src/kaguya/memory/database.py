@@ -10,7 +10,6 @@ from __future__ import annotations
 import asyncio
 import sqlite3
 import struct
-from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -55,7 +54,7 @@ class Database:
         self._conn.enable_load_extension(True)
         sqlite_vec.load(self._conn)
         self._conn.enable_load_extension(False)
-        
+
         # 验证
         version = self._conn.execute("SELECT vec_version()").fetchone()[0]
         logger.debug(f"sqlite-vec v{version} 加载成功 (WAL mode)")
@@ -72,6 +71,7 @@ class Database:
         c = self._conn
 
         c.executescript(f"""
+            -- 消息表（is_archived: 是否已被归入话题）
             CREATE TABLE IF NOT EXISTS messages (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_id TEXT NOT NULL,
@@ -81,20 +81,31 @@ class Database:
                 display_content TEXT,
                 tool_calls TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                is_vectorized BOOLEAN DEFAULT FALSE
+                is_archived BOOLEAN DEFAULT FALSE
             );
 
-            CREATE TABLE IF NOT EXISTS daily_logs (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+            -- 话题表（每个用户的记忆按话题组织）
+            CREATE TABLE IF NOT EXISTS topics (
+                id TEXT PRIMARY KEY,
                 user_id TEXT NOT NULL,
-                summary TEXT NOT NULL,
-                message_range_start INTEGER,
-                message_range_end INTEGER,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                title TEXT NOT NULL,
+                summary TEXT NOT NULL DEFAULT '',
+                message_count INTEGER DEFAULT 0,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
 
+            -- 话题↔消息关联表
+            CREATE TABLE IF NOT EXISTS topic_messages (
+                topic_id TEXT NOT NULL,
+                message_id INTEGER NOT NULL,
+                PRIMARY KEY (topic_id, message_id)
+            );
+
+            -- 笔记本（owner_id: 'kaguya' 或用户ID）
             CREATE TABLE IF NOT EXISTS notebook (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                owner_id TEXT NOT NULL DEFAULT 'kaguya',
                 title TEXT,
                 content TEXT NOT NULL,
                 tags TEXT,
@@ -102,6 +113,7 @@ class Database:
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
 
+            -- 技能
             CREATE TABLE IF NOT EXISTS skills (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 name TEXT NOT NULL UNIQUE,
@@ -111,6 +123,7 @@ class Database:
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
 
+            -- 任务
             CREATE TABLE IF NOT EXISTS tasks (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 title TEXT NOT NULL,
@@ -122,6 +135,7 @@ class Database:
                 completed_at TIMESTAMP
             );
 
+            -- 定时器
             CREATE TABLE IF NOT EXISTS timers (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 name TEXT NOT NULL,
@@ -135,26 +149,17 @@ class Database:
             );
         """)
 
-        # vec0 虚拟表（不支持 IF NOT EXISTS）
+        # 话题向量表（只对话题摘要做向量化，不对原始消息）
         try:
             c.execute(
-                f"CREATE VIRTUAL TABLE message_vectors USING vec0("
-                f"  message_id INTEGER, embedding float[{dim}]"
+                f"CREATE VIRTUAL TABLE topic_vectors USING vec0("
+                f"  topic_id TEXT, embedding float[{dim}]"
                 f")"
             )
         except sqlite3.OperationalError:
             pass  # 已存在
 
-        try:
-            c.execute(
-                f"CREATE VIRTUAL TABLE notebook_vectors USING vec0("
-                f"  note_id INTEGER, embedding float[{dim}]"
-                f")"
-            )
-        except sqlite3.OperationalError:
-            pass
-
-        # FTS5（使用 trigram 分词器，支持中文子串匹配）
+        # FTS5（消息全文检索，用于在话题内关键词搜索）
         try:
             c.execute("""
                 CREATE VIRTUAL TABLE messages_fts USING fts5(
@@ -189,7 +194,7 @@ class Database:
                 (user_id, platform, role, content, display_content, tool_calls),
             )
             msg_id = cursor.lastrowid
-            # 同步更新 FTS5 索引
+            # 同步更新 FTS5
             self._conn.execute(
                 "INSERT INTO messages_fts(rowid, content) VALUES (?, ?)",
                 (msg_id, content),
@@ -199,8 +204,8 @@ class Database:
 
         return await asyncio.to_thread(_save)
 
-    async def get_recent_messages(self, user_id: str, limit: int = 10) -> list[dict]:
-        """获取最近 N 条消息"""
+    async def get_recent_messages(self, user_id: str, limit: int = 20) -> list[dict]:
+        """获取最近 N 条消息（按时间正序）"""
         def _get():
             rows = self._conn.execute(
                 """SELECT id, role, content, display_content, created_at
@@ -217,55 +222,300 @@ class Database:
 
         return await asyncio.to_thread(_get)
 
-    # ==================== 向量操作 ====================
+    # ==================== 未归档消息操作 ====================
 
-    async def insert_vector(self, message_id: int, embedding: list[float]) -> None:
-        """插入消息向量"""
-        def _insert():
+    async def get_unarchived_count(self, user_id: str) -> int:
+        """获取未归档消息数量"""
+        def _get():
+            return self._conn.execute(
+                "SELECT COUNT(*) FROM messages WHERE user_id = ? AND is_archived = FALSE",
+                (user_id,),
+            ).fetchone()[0]
+
+        return await asyncio.to_thread(_get)
+
+    async def get_unarchived_messages(self, user_id: str) -> list[dict]:
+        """获取所有未归档消息（含 display_content，按时间正序）"""
+        def _get():
+            rows = self._conn.execute(
+                """SELECT id, role, content, display_content, created_at
+                   FROM messages
+                   WHERE user_id = ? AND is_archived = FALSE
+                   ORDER BY id ASC""",
+                (user_id,),
+            ).fetchall()
+            return [
+                {
+                    "id": r[0], "role": r[1], "content": r[2],
+                    "display_content": r[3], "created_at": r[4],
+                }
+                for r in rows
+            ]
+
+        return await asyncio.to_thread(_get)
+
+    async def mark_archived(self, message_ids: list[int]) -> None:
+        """将消息标记为已归档"""
+        if not message_ids:
+            return
+
+        def _mark():
+            placeholders = ",".join("?" * len(message_ids))
             self._conn.execute(
-                "INSERT INTO message_vectors(rowid, message_id, embedding) VALUES (?, ?, ?)",
-                (message_id, message_id, serialize_f32(embedding)),
+                f"UPDATE messages SET is_archived = TRUE WHERE id IN ({placeholders})",
+                message_ids,
             )
             self._conn.commit()
 
-        await asyncio.to_thread(_insert)
+        await asyncio.to_thread(_mark)
 
-    async def search_vectors(
-        self, query_embedding: list[float], top_k: int = 10
-    ) -> list[tuple[int, float]]:
-        """向量 KNN 搜索，返回 [(message_id, distance), ...]"""
-        def _search():
-            return self._conn.execute(
-                """SELECT message_id, distance
-                   FROM message_vectors
-                   WHERE embedding MATCH ?
-                   ORDER BY distance
+    async def get_recent_active_users(self, limit: int = 10) -> list[dict]:
+        """
+        获取最近有过对话的用户列表（用于主动意识的用户感知）。
+        返回字段：user_id, platform, last_message_at, message_count
+        """
+        def _get():
+            rows = self._conn.execute(
+                """SELECT user_id, platform,
+                          MAX(created_at) as last_message_at,
+                          COUNT(*) as message_count
+                   FROM messages
+                   WHERE user_id NOT IN ('__system__', 'kaguya')
+                   GROUP BY user_id, platform
+                   ORDER BY last_message_at DESC
                    LIMIT ?""",
-                (serialize_f32(query_embedding), top_k),
+                (limit,),
+            ).fetchall()
+            return [
+                {
+                    "user_id": r[0], "platform": r[1],
+                    "last_message_at": r[2], "message_count": r[3],
+                }
+                for r in rows
+            ]
+        return await asyncio.to_thread(_get)
+
+    async def get_recent_messages_snapshot(
+        self, per_user: int = 5, max_users: int = 5
+    ) -> list[dict]:
+        """
+        获取最近活跃用户的最新 N 条消息（用于主动意识的对话感知）。
+        返回字段：user_id, role, content, display_content, created_at
+        """
+        def _get():
+            # 先找最近 max_users 个活跃用户
+            active_users = self._conn.execute(
+                """SELECT user_id FROM messages
+                   WHERE user_id NOT IN ('__system__', 'kaguya')
+                   GROUP BY user_id
+                   ORDER BY MAX(created_at) DESC
+                   LIMIT ?""",
+                (max_users,),
             ).fetchall()
 
-        rows = await asyncio.to_thread(_search)
-        return [(r[0], r[1]) for r in rows]
+            result = []
+            for (uid,) in active_users:
+                rows = self._conn.execute(
+                    """SELECT user_id, role, content, display_content, created_at
+                       FROM messages
+                       WHERE user_id = ?
+                       ORDER BY id DESC LIMIT ?""",
+                    (uid, per_user),
+                ).fetchall()
+                for r in reversed(rows):
+                    result.append({
+                        "user_id": r[0], "role": r[1], "content": r[2],
+                        "display_content": r[3], "created_at": r[4],
+                    })
+            return result
+        return await asyncio.to_thread(_get)
 
-    # ==================== FTS5 操作 ====================
+    # ==================== 话题操作 ====================
 
-    async def search_fts(self, query: str, top_k: int = 10) -> list[tuple[int, float]]:
-        """FTS5 全文检索（trigram 分词，支持中文子串匹配）"""
-        query = query.strip()
-        if not query:
+    async def get_all_topics(self, user_id: str) -> list[dict]:
+        """获取用户所有话题（只含 id/title/updated_at/message_count，不含摘要正文）"""
+        def _get():
+            rows = self._conn.execute(
+                """SELECT id, title, message_count, updated_at
+                   FROM topics WHERE user_id = ?
+                   ORDER BY updated_at DESC""",
+                (user_id,),
+            ).fetchall()
+            return [
+                {"id": r[0], "title": r[1], "message_count": r[2], "updated_at": r[3]}
+                for r in rows
+            ]
+
+        return await asyncio.to_thread(_get)
+
+    async def get_topic_by_id(self, topic_id: str) -> dict | None:
+        """获取话题完整内容（含摘要）"""
+        def _get():
+            row = self._conn.execute(
+                """SELECT id, user_id, title, summary, message_count, created_at, updated_at
+                   FROM topics WHERE id = ?""",
+                (topic_id,),
+            ).fetchone()
+            if not row:
+                return None
+            return {
+                "id": row[0], "user_id": row[1], "title": row[2],
+                "summary": row[3], "message_count": row[4],
+                "created_at": row[5], "updated_at": row[6],
+            }
+
+        return await asyncio.to_thread(_get)
+
+    async def upsert_topic(
+        self,
+        topic_id: str,
+        user_id: str,
+        title: str,
+        summary: str,
+        message_count: int,
+    ) -> None:
+        """创建或更新话题（upsert）"""
+        def _upsert():
+            self._conn.execute(
+                """INSERT INTO topics (id, user_id, title, summary, message_count, updated_at)
+                   VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                   ON CONFLICT(id) DO UPDATE SET
+                       title=excluded.title,
+                       summary=excluded.summary,
+                       message_count=excluded.message_count,
+                       updated_at=CURRENT_TIMESTAMP""",
+                (topic_id, user_id, title, summary, message_count),
+            )
+            self._conn.commit()
+
+        await asyncio.to_thread(_upsert)
+
+    async def get_recent_updated_topics(self, user_id: str, n: int = 1) -> list[dict]:
+        """获取最近更新的 N 个话题（含完整摘要）"""
+        def _get():
+            rows = self._conn.execute(
+                """SELECT id, title, summary, message_count, updated_at
+                   FROM topics WHERE user_id = ?
+                   ORDER BY updated_at DESC LIMIT ?""",
+                (user_id, n),
+            ).fetchall()
+            return [
+                {
+                    "id": r[0], "title": r[1], "summary": r[2],
+                    "message_count": r[3], "updated_at": r[4],
+                }
+                for r in rows
+            ]
+
+        return await asyncio.to_thread(_get)
+
+    # ==================== 话题↔消息关联操作 ====================
+
+    async def link_messages_to_topic(self, topic_id: str, message_ids: list[int]) -> None:
+        """将消息 ID 列表关联到指定话题"""
+        if not message_ids:
+            return
+
+        def _link():
+            self._conn.executemany(
+                "INSERT OR IGNORE INTO topic_messages (topic_id, message_id) VALUES (?, ?)",
+                [(topic_id, mid) for mid in message_ids],
+            )
+            self._conn.commit()
+
+        await asyncio.to_thread(_link)
+
+    async def get_messages_by_topic(self, topic_id: str, limit: int = 50) -> list[dict]:
+        """获取话题下所有原始消息（时间正序）"""
+        def _get():
+            rows = self._conn.execute(
+                """SELECT m.id, m.role, m.content, m.display_content, m.created_at
+                   FROM messages m
+                   JOIN topic_messages tm ON m.id = tm.message_id
+                   WHERE tm.topic_id = ?
+                   ORDER BY m.id ASC
+                   LIMIT ?""",
+                (topic_id, limit),
+            ).fetchall()
+            return [
+                {
+                    "id": r[0], "role": r[1], "content": r[2],
+                    "display_content": r[3], "created_at": r[4],
+                }
+                for r in rows
+            ]
+
+        return await asyncio.to_thread(_get)
+
+    async def search_messages_in_topics(
+        self, topic_ids: list[str], keyword: str, limit: int = 10
+    ) -> list[dict]:
+        """在指定话题的消息中进行关键词检索（FTS5）"""
+        if not topic_ids or not keyword:
             return []
-        # trigram tokenizer 直接匹配子串
-        fts_query = f'"{query}"'
 
+        def _search():
+            placeholders = ",".join("?" * len(topic_ids))
+            # 先用 FTS5 找命中的消息 ID，再过滤属于指定话题的消息
+            fts_query = f'"{keyword}"'
+            try:
+                rows = self._conn.execute(
+                    f"""SELECT m.id, m.role, m.display_content, m.content, m.created_at
+                        FROM messages_fts f
+                        JOIN messages m ON m.id = f.rowid
+                        JOIN topic_messages tm ON m.id = tm.message_id
+                        WHERE f.messages_fts MATCH ?
+                          AND tm.topic_id IN ({placeholders})
+                        ORDER BY f.rank
+                        LIMIT ?""",
+                    [fts_query] + topic_ids + [limit],
+                ).fetchall()
+            except Exception:
+                return []
+            return [
+                {
+                    "id": r[0], "role": r[1],
+                    "content": (r[2] or r[3])[:300],
+                    "created_at": r[4],
+                }
+                for r in rows
+            ]
+
+        return await asyncio.to_thread(_search)
+
+    # ==================== 话题向量操作 ====================
+
+    async def upsert_topic_vector(self, topic_id: str, embedding: list[float]) -> None:
+        """插入或更新话题向量"""
+        def _upsert():
+            # sqlite-vec 的 vec0 表不支持 ON CONFLICT，需要先删再插
+            try:
+                self._conn.execute(
+                    "DELETE FROM topic_vectors WHERE topic_id = ?", (topic_id,)
+                )
+            except Exception:
+                pass
+            self._conn.execute(
+                "INSERT INTO topic_vectors(topic_id, embedding) VALUES (?, ?)",
+                (topic_id, serialize_f32(embedding)),
+            )
+            self._conn.commit()
+
+        await asyncio.to_thread(_upsert)
+
+    async def search_topic_vectors(
+        self, query_embedding: list[float], top_k: int = 3
+    ) -> list[tuple[str, float]]:
+        """在话题向量中做 KNN 搜索，返回 [(topic_id, distance), ...]"""
         def _search():
             try:
                 return self._conn.execute(
-                    """SELECT rowid, rank
-                       FROM messages_fts
-                       WHERE messages_fts MATCH ?
-                       ORDER BY rank
+                    """SELECT topic_id, distance
+                       FROM topic_vectors
+                       WHERE embedding MATCH ?
+                       ORDER BY distance
                        LIMIT ?""",
-                    (fts_query, top_k),
+                    (serialize_f32(query_embedding), top_k),
                 ).fetchall()
             except Exception:
                 return []
@@ -273,132 +523,79 @@ class Database:
         rows = await asyncio.to_thread(_search)
         return [(r[0], r[1]) for r in rows]
 
-    # ==================== 未向量化消息 ====================
-
-    async def get_unvectorized_messages(self, user_id: str) -> list[dict]:
-        """获取指定用户的所有未向量化消息"""
-        def _get():
-            return self._conn.execute(
-                """SELECT id, content FROM messages
-                   WHERE user_id = ? AND is_vectorized = FALSE
-                   ORDER BY id ASC""",
-                (user_id,),
-            ).fetchall()
-
-        rows = await asyncio.to_thread(_get)
-        return [{"id": r[0], "content": r[1]} for r in rows]
-
-    async def get_unvectorized_count(self, user_id: str) -> int:
-        """获取未向量化消息数量"""
-        def _get():
-            return self._conn.execute(
-                "SELECT COUNT(*) FROM messages WHERE user_id = ? AND is_vectorized = FALSE",
-                (user_id,),
-            ).fetchone()[0]
-
-        return await asyncio.to_thread(_get)
-
-    async def mark_vectorized(self, message_ids: list[int]) -> None:
-        """将消息标记为已向量化"""
-        if not message_ids:
-            return
-        def _mark():
-            placeholders = ",".join("?" * len(message_ids))
-            self._conn.execute(
-                f"UPDATE messages SET is_vectorized = TRUE WHERE id IN ({placeholders})",
-                message_ids,
-            )
-            self._conn.commit()
-
-        await asyncio.to_thread(_mark)
-
-    async def fetch_messages_by_ids(self, ids: list[int]) -> list[dict]:
-        """根据 ID 列表获取消息"""
-        if not ids:
-            return []
-        def _fetch():
-            placeholders = ",".join("?" * len(ids))
-            return self._conn.execute(
-                f"""SELECT id, user_id, role, content, display_content, created_at
-                    FROM messages WHERE id IN ({placeholders})
-                    ORDER BY id ASC""",
-                ids,
-            ).fetchall()
-
-        rows = await asyncio.to_thread(_fetch)
-        return [
-            {
-                "id": r[0], "user_id": r[1], "role": r[2],
-                "content": r[3], "display_content": r[4], "created_at": r[5],
-            }
-            for r in rows
-        ]
-
-    # ==================== 日志操作 ====================
-
-    async def save_daily_log(
-        self, user_id: str, summary: str, range_start: int, range_end: int
-    ) -> None:
-        """保存对话摘要日志"""
-        def _save():
-            self._conn.execute(
-                """INSERT INTO daily_logs (user_id, summary, message_range_start, message_range_end)
-                   VALUES (?, ?, ?, ?)""",
-                (user_id, summary, range_start, range_end),
-            )
-            self._conn.commit()
-
-        await asyncio.to_thread(_save)
-
-    async def get_daily_logs(self, user_id: str | None = None, limit: int = 10) -> list[dict]:
-        """获取日志摘要列表"""
-        def _get():
-            if user_id:
-                rows = self._conn.execute(
-                    "SELECT id, user_id, summary, created_at FROM daily_logs WHERE user_id = ? ORDER BY id DESC LIMIT ?",
-                    (user_id, limit),
-                ).fetchall()
-            else:
-                rows = self._conn.execute(
-                    "SELECT id, user_id, summary, created_at FROM daily_logs ORDER BY id DESC LIMIT ?",
-                    (limit,),
-                ).fetchall()
-            return [{"id": r[0], "user_id": r[1], "summary": r[2], "created_at": r[3]} for r in rows]
-        return await asyncio.to_thread(_get)
-
     # ==================== 笔记本操作 ====================
 
-    async def save_note(self, title: str, content: str, tags: str = "") -> int:
+    async def save_note(self, title: str, content: str, tags: str = "", owner_id: str = "kaguya") -> int:
         """保存笔记，返回 ID"""
         def _save():
             cursor = self._conn.execute(
-                "INSERT INTO notebook (title, content, tags) VALUES (?, ?, ?)",
-                (title, content, tags),
+                "INSERT INTO notebook (owner_id, title, content, tags) VALUES (?, ?, ?, ?)",
+                (owner_id, title, content, tags),
             )
             self._conn.commit()
             return cursor.lastrowid
         return await asyncio.to_thread(_save)
 
+    async def get_note_by_id(self, note_id: int) -> dict | None:
+        """根据 ID 获取笔记完整内容"""
+        def _get():
+            row = self._conn.execute(
+                "SELECT id, owner_id, title, content, tags, created_at, updated_at FROM notebook WHERE id = ?",
+                (note_id,),
+            ).fetchone()
+            if not row:
+                return None
+            return {"id": row[0], "owner_id": row[1], "title": row[2], "content": row[3], "tags": row[4], "created_at": row[5], "updated_at": row[6]}
+        return await asyncio.to_thread(_get)
+
+    async def get_notes_by_owner(self, owner_id: str, limit: int = 20) -> list[dict]:
+        """获取指定 owner 的笔记列表（含标题和时间，不含正文）"""
+        def _get():
+            rows = self._conn.execute(
+                "SELECT id, title, tags, updated_at FROM notebook WHERE owner_id = ? ORDER BY updated_at DESC LIMIT ?",
+                (owner_id, limit),
+            ).fetchall()
+            return [{"id": r[0], "title": r[1], "tags": r[2], "updated_at": r[3]} for r in rows]
+        return await asyncio.to_thread(_get)
+
+    async def append_note_content(self, note_id: int, additional_content: str) -> bool:
+        """向笔记追加内容，返回是否成功"""
+        def _append():
+            result = self._conn.execute(
+                "UPDATE notebook SET content = content || ? || ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                ("\n\n", additional_content, note_id),
+            )
+            self._conn.commit()
+            return result.rowcount > 0
+        return await asyncio.to_thread(_append)
+
+    async def delete_note(self, note_id: int) -> bool:
+        """删除笔记，返回是否成功"""
+        def _del():
+            result = self._conn.execute("DELETE FROM notebook WHERE id = ?", (note_id,))
+            self._conn.commit()
+            return result.rowcount > 0
+        return await asyncio.to_thread(_del)
+
     async def get_notes(self, tag: str | None = None, limit: int = 20) -> list[dict]:
-        """获取笔记列表"""
+        """获取笔记列表（兼容旧接口）"""
         def _get():
             if tag:
                 rows = self._conn.execute(
-                    "SELECT id, title, content, tags, created_at FROM notebook WHERE tags LIKE ? ORDER BY id DESC LIMIT ?",
+                    "SELECT id, owner_id, title, content, tags, updated_at FROM notebook WHERE tags LIKE ? ORDER BY updated_at DESC LIMIT ?",
                     (f"%{tag}%", limit),
                 ).fetchall()
             else:
                 rows = self._conn.execute(
-                    "SELECT id, title, content, tags, created_at FROM notebook ORDER BY id DESC LIMIT ?",
+                    "SELECT id, owner_id, title, content, tags, updated_at FROM notebook ORDER BY updated_at DESC LIMIT ?",
                     (limit,),
                 ).fetchall()
-            return [{"id": r[0], "title": r[1], "content": r[2], "tags": r[3], "created_at": r[4]} for r in rows]
+            return [{"id": r[0], "owner_id": r[1], "title": r[2], "content": r[3], "tags": r[4], "updated_at": r[5]} for r in rows]
         return await asyncio.to_thread(_get)
 
     # ==================== 技能操作 ====================
 
     async def save_skill(self, name: str, description: str, trigger_keywords: str = "") -> int:
-        """保存技能"""
         def _save():
             cursor = self._conn.execute(
                 "INSERT OR REPLACE INTO skills (name, description, trigger_keywords) VALUES (?, ?, ?)",
@@ -409,7 +606,6 @@ class Database:
         return await asyncio.to_thread(_save)
 
     async def get_skills(self, active_only: bool = True) -> list[dict]:
-        """获取技能列表"""
         def _get():
             sql = "SELECT id, name, description, trigger_keywords, is_active FROM skills"
             if active_only:
@@ -419,7 +615,6 @@ class Database:
         return [{"id": r[0], "name": r[1], "description": r[2], "trigger_keywords": r[3], "is_active": r[4]} for r in rows]
 
     async def delete_skill(self, name: str) -> bool:
-        """删除技能"""
         def _del():
             self._conn.execute("DELETE FROM skills WHERE name = ?", (name,))
             self._conn.commit()
@@ -429,7 +624,6 @@ class Database:
     # ==================== 任务操作 ====================
 
     async def save_task(self, title: str, description: str = "", priority: int = 0, due_at: str | None = None) -> int:
-        """保存任务"""
         def _save():
             cursor = self._conn.execute(
                 "INSERT INTO tasks (title, description, priority, due_at) VALUES (?, ?, ?, ?)",
@@ -440,7 +634,6 @@ class Database:
         return await asyncio.to_thread(_save)
 
     async def get_tasks(self, status: str | None = None, limit: int = 20) -> list[dict]:
-        """获取任务列表"""
         def _get():
             if status:
                 rows = self._conn.execute(
@@ -456,7 +649,6 @@ class Database:
         return await asyncio.to_thread(_get)
 
     async def update_task_status(self, task_id: int, status: str) -> None:
-        """更新任务状态"""
         def _update():
             extra = ", completed_at = CURRENT_TIMESTAMP" if status == "done" else ""
             self._conn.execute(f"UPDATE tasks SET status = ?{extra} WHERE id = ?", (status, task_id))
@@ -464,7 +656,6 @@ class Database:
         await asyncio.to_thread(_update)
 
     async def delete_task(self, task_id: int) -> None:
-        """删除任务"""
         def _del():
             self._conn.execute("DELETE FROM tasks WHERE id = ?", (task_id,))
             self._conn.commit()
@@ -478,7 +669,6 @@ class Database:
         cron_expression: str | None = None,
         is_recurring: bool = False,
     ) -> int:
-        """保存定时器"""
         def _save():
             cursor = self._conn.execute(
                 "INSERT INTO timers (name, action, trigger_at, cron_expression, is_recurring) VALUES (?, ?, ?, ?, ?)",
@@ -489,7 +679,6 @@ class Database:
         return await asyncio.to_thread(_save)
 
     async def get_active_timers(self) -> list[dict]:
-        """获取所有活跃定时器"""
         def _get():
             return self._conn.execute(
                 "SELECT id, name, action, trigger_at, cron_expression, is_recurring, last_triggered_at FROM timers WHERE is_active = TRUE",
@@ -498,7 +687,6 @@ class Database:
         return [{"id": r[0], "name": r[1], "action": r[2], "trigger_at": r[3], "cron": r[4], "recurring": r[5], "last_triggered": r[6]} for r in rows]
 
     async def get_triggered_timers(self) -> list[dict]:
-        """获取已到期的一次性定时器"""
         def _get():
             return self._conn.execute(
                 "SELECT id, name, action, trigger_at FROM timers WHERE is_active = TRUE AND is_recurring = FALSE AND trigger_at <= datetime('now', 'localtime')",
@@ -507,14 +695,12 @@ class Database:
         return [{"id": r[0], "name": r[1], "action": r[2], "trigger_at": r[3]} for r in rows]
 
     async def deactivate_timer(self, timer_id: int) -> None:
-        """停用定时器"""
         def _update():
             self._conn.execute("UPDATE timers SET is_active = FALSE, last_triggered_at = CURRENT_TIMESTAMP WHERE id = ?", (timer_id,))
             self._conn.commit()
         await asyncio.to_thread(_update)
 
     async def delete_timer(self, timer_id: int) -> None:
-        """删除定时器"""
         def _del():
             self._conn.execute("DELETE FROM timers WHERE id = ?", (timer_id,))
             self._conn.commit()

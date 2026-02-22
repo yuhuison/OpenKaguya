@@ -32,6 +32,10 @@ class BrowserToolkit:
         cloud_proxy_country: str = "us",
         api_key: str = "",
         screenshot_dir: Path | None = None,
+        # 主模型配置（供 browser_task 默认复用）
+        primary_model: str = "",
+        primary_base_url: str = "",
+        primary_api_key: str = "",
     ):
         self.mode = mode
         self.chrome_path = chrome_path
@@ -40,6 +44,11 @@ class BrowserToolkit:
         self.cloud_proxy_country = cloud_proxy_country
         self.screenshot_dir = screenshot_dir or Path("data/workspaces/kaguya/screenshots")
         self.screenshot_dir.mkdir(parents=True, exist_ok=True)
+
+        # 主模型配置，内部工具（browser_task）默认复用
+        self.primary_model = primary_model
+        self.primary_base_url = primary_base_url
+        self.primary_api_key = primary_api_key
 
         # Cloud 模式需要 API Key（通过环境变量传递给 browser-use）
         if api_key:
@@ -105,6 +114,7 @@ class BrowserToolkit:
     def get_tools(self) -> list[Tool]:
         """获取所有浏览器工具"""
         return [
+            BrowserRunTaskTool(self),   # 首选！用于复杂浏览/搜索任务
             BrowserOpenTool(self),
             BrowserSearchTool(self),
             BrowserClickTool(self),
@@ -119,6 +129,103 @@ class BrowserToolkit:
 
 
 # ========================= 浏览器工具实现 =========================
+
+
+class BrowserRunTaskTool(Tool):
+    """
+    用自然语言描述一个浏览任务，browser-use Agent 会自动完成整个浏览流程并返回结果。
+
+    适合委托复杂任务：搜索、阅读文章、收集信息等。
+    """
+
+    def __init__(self, toolkit: BrowserToolkit):
+        self._tk = toolkit
+
+    @property
+    def name(self): return "browser_task"
+
+    @property
+    def description(self):
+        return (
+            "【首选】用自然语言描述一个浏览任务，AI 代理会自动完成整个浏览流程并返回结果。"
+            "适合搜索、阅读网页、收集信息等复杂任务，远比自己一步步 open/click/get_text 更高效。"
+            "示例：browser_task(task=\"去微博热搜看看今天什么最火，返回前5条\")"
+        )
+
+    @property
+    def parameters(self):
+        return {
+            "type": "object",
+            "properties": {
+                "task": {
+                    "type": "string",
+                    "description": "用自然语言描述任务，尽量具体说明想要获取的信息和期望输出格式"
+                },
+                "llm_model": {
+                    "type": "string",
+                    "description": "可选，指定代理使用的模型名（默认使用系统配置）"
+                },
+            },
+            "required": ["task"],
+        }
+
+    async def execute(self, task: str, llm_model: str = "", **_) -> str:
+        try:
+            from browser_use import Agent
+            from langchain_openai import ChatOpenAI
+            import os
+
+            # 优先级：调用旹指定 > BrowserToolkit 配置的主模型 > 环境变量
+            model_name = (
+                llm_model
+                or self._tk.primary_model
+                or os.environ.get("BROWSER_TASK_MODEL", "")
+            )
+            base_url = (
+                self._tk.primary_base_url
+                or os.environ.get("BROWSER_TASK_BASE_URL")
+                or os.environ.get("OPENAI_BASE_URL")
+            )
+            api_key = (
+                self._tk.primary_api_key
+                or os.environ.get("BROWSER_TASK_API_KEY")
+                or os.environ.get("OPENAI_API_KEY", "")
+            )
+
+            if not model_name:
+                return (
+                    "错误：未配置 browser_task 使用的模型。"
+                    "请在 BrowserToolkit 中传入 primary_model，"
+                    "或设置环境变量 BROWSER_TASK_MODEL。"
+                )
+
+            llm_kwargs: dict = {"model": model_name, "api_key": api_key or "placeholder"}
+            if base_url:
+                llm_kwargs["base_url"] = base_url
+            llm = ChatOpenAI(**llm_kwargs)
+
+            # 如果已有浏览器实例（包括 cloud 模式），传入共用；否则 Agent 自己创建
+            await self._tk._ensure_browser()
+            agent = Agent(
+                task=task,
+                llm=llm,
+                browser=self._tk._browser,
+            )
+
+            result = await agent.run()
+            if hasattr(result, "final_result"):
+                final = result.final_result()
+            elif isinstance(result, list):
+                final = str(result[-1]) if result else ""
+            else:
+                final = str(result)
+
+            return final or "任务已完成，但无返回结果"
+
+        except ImportError:
+            return "错误：browser_use 未安装或不支持 Agent 模式"
+        except Exception as e:
+            return f"浏览器任务执行失败: {e}"
 
 
 class BrowserOpenTool(Tool):

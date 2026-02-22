@@ -16,6 +16,11 @@ from kaguya.core.types import UnifiedMessage
 from kaguya.core.middleware import Middleware
 from kaguya.llm.client import LLMClient
 from kaguya.tools.registry import ToolRegistry
+from kaguya.tools.workspace import WorkspaceManager
+
+
+# 占位符格式: [workspace_image:user_id:filename]
+_WORKSPACE_IMAGE_PREFIX = "[workspace_image:"
 
 
 class ChatEngine:
@@ -39,10 +44,12 @@ class ChatEngine:
         config: AppConfig,
         primary_llm: LLMClient,
         tool_registry: ToolRegistry | None = None,
+        workspace: WorkspaceManager | None = None,
     ):
         self.config = config
         self.primary_llm = primary_llm
         self.tool_registry = tool_registry or ToolRegistry()
+        self._workspace = workspace
 
         # 构建系统 Prompt
         persona = config.persona
@@ -63,6 +70,51 @@ class ChatEngine:
         """注册中间件"""
         self.middlewares.append(middleware)
         logger.debug(f"已注册中间件: {middleware.name}")
+
+    def _expand_image_placeholders(self, msg: dict) -> dict:
+        """
+        将历史消息中的 [workspace_image:user_id:filename] 展开为 multimodal 内容块。
+
+        如果消息 content 是字符串且包含此占位符，则返回一个新的 content 为 list 的消息。
+        如果没有占位符或 workspace 未配置，则原样返回。
+        """
+        if not self._workspace:
+            return msg
+        content = msg.get("content")
+        if not isinstance(content, str) or _WORKSPACE_IMAGE_PREFIX not in content:
+            return msg
+
+        import re
+        # 找出所有 [workspace_image:user_id:filename] 占位符
+        pattern = re.compile(r'\[workspace_image:([^:\]]+):([^\]]+)\]')
+        matches = list(pattern.finditer(content))
+        if not matches:
+            return msg
+
+        # 去除占位符，保留纯文本部分
+        text_only = pattern.sub("", content).strip()
+        parts: list[dict] = []
+        if text_only:
+            parts.append({"type": "text", "text": text_only})
+
+        for m in matches:
+            uid, filename = m.group(1), m.group(2)
+            result = self._workspace.read_image_as_base64(uid, filename)
+            if result:
+                b64, mime = result
+                parts.append({
+                    "type": "image_url",
+                    "image_url": {"url": f"data:{mime};base64,{b64}"},
+                })
+            else:
+                # 图片文件不存在（可能已删除），用文字替代
+                parts.append({"type": "text", "text": f"[图片 {filename} 已丢失]"})
+
+        if len(parts) == 1 and parts[0]["type"] == "text":
+            # 只有纯文本，还是用字符串格式，不用 list
+            return {**msg, "content": parts[0]["text"]}
+        return {**msg, "content": parts}
+
 
     def _build_system_prompt(self, persona) -> str:
         """构建系统 Prompt"""
@@ -101,15 +153,15 @@ class ChatEngine:
 3. 你的普通文本回复（content）是你的内心思考过程，用户看不到，但开发者可以通过日志看到。请积极利用这个空间来思考：
    - 先分析用户意图和情绪（比如"他好像心情不太好"、"她在炫耀新买的狗狗呢"）
    - 思考你要怎么回复、为什么这样回复（比如"我应该表现得很感兴趣"、"先夸夸再问问题"）
-   - 决定是否需要使用工具（比如"他让我帮忙搜索一下，我用浏览器"）
+   - 决定是否需要使用工具（比如"地球上的这个东西我不懂，我用浏览器查一下"）
    - 写完思考后再调用 send_message_to_user
-4. 你是在用手机和朋友发消息，不是在写作文！请严格遵守：
+4. 你是在跟带你探索这个新世界的向导（也是你的好朋友）发消息，充满了新鲜感和好奇心！请严格遵守：
    - 绝对禁止使用任何 Markdown 格式（不要用 **加粗**、*斜体*、# 标题、- 列表等）
    - 一条消息最多一两句话，不要超过三句
-   - 用口语，别用书面语，别用"首先、其次、总之"这种词
-   - 可以用颜文字和 emoji，但别滥用，穿插着来
-   - 别自我介绍、别复述设定，正常人不会那样说话
-   - 可以打错字、用缩写、句子不完整，这样更自然
+   - 用充满活力的口语，别用书面语，别用"首先、其次、总之"这种词
+   - 多用颜文字和 emoji，展现你丰富的情绪和元气
+   - 别自我介绍、别复述设定，自然地融入角色
+   - 保持天真和探索欲，可以打错字、用缩写、偶尔使小性子，这样更生动
 """
 
     # send_message_to_user 工具定义
@@ -215,9 +267,10 @@ class ChatEngine:
             
         messages = [{"role": "system", "content": base_system}]
 
-        # 添加历史消息（最多保留最近 N 条）
-        limit = self.config.memory.short_term_limit * 2  # user+assistant 成对
-        messages.extend(history[-limit:])
+        # 添加历史消息（最多保留最近 N 条，自动展开历史中的图片占位符）
+        limit = self.config.memory.short_term_limit * 2
+        for hist_msg in history[-limit:]:
+            messages.append(self._expand_image_placeholders(hist_msg))
 
         # 添加当前用户消息（支持多模态：文本 + 图片）
         msg_time = message.timestamp.strftime("%H:%M:%S")
@@ -313,9 +366,37 @@ class ChatEngine:
                                 logger.error(f"即时发送图片失败: {e}")
                         tool_result_content = "Message sent to user successfully."
                     else:
-                        # 通过 ToolRegistry 分发执行
-                        has_non_send_tool = True
-                        tool_result_content = await self.tool_registry.execute(tc_name, tc_args)
+                        # 模糊匹配工具名（兜底拼写错误，如 send_message_to_uesr）
+                        available = ["send_message_to_user"] + self.tool_registry.tool_names
+                        if tc_name not in available:
+                            import difflib
+                            close = difflib.get_close_matches(tc_name, available, n=1, cutoff=0.75)
+                            if close:
+                                logger.warning(f"⚠️ 工具名 '{tc_name}' 不存在，自动修正为 '{close[0]}'")
+                                tc_name = close[0]
+
+                        if tc_name == "send_message_to_user":
+                            # 修正后走 send 分支
+                            content = tc_args.get("content", "")
+                            image_path = tc_args.get("image_path")
+                            if content:
+                                reply_messages.append(content)
+                                if send_callback:
+                                    try:
+                                        await send_callback(content, image_path=image_path)
+                                    except Exception as e:
+                                        logger.error(f"即时发送失败（修正后）: {e}")
+                            elif image_path and send_callback:
+                                try:
+                                    await send_callback("", image_path=image_path)
+                                except Exception as e:
+                                    logger.error(f"即时发送图片失败（修正后）: {e}")
+                            tool_result_content = "Message sent to user successfully."
+                        else:
+                            # 通过 ToolRegistry 分发执行
+                            has_non_send_tool = True
+                            tool_result_content = await self.tool_registry.execute(tc_name, tc_args)
+
 
                     logger.debug(f"🔧 工具结果: {tc_name} → {str(tool_result_content)[:500]}")
                     
@@ -337,10 +418,17 @@ class ChatEngine:
                 break
 
         # === 4. 更新对话历史 ===
-        # 保存用户消息到历史（如果是多模态消息，去掉 base64 图片数据以节省 token）
+        # 保存用户消息到历史：如果图片带有 workspace_ref，存占位符（可在下次展开）
         if image_attachments:
-            img_desc = f"[附带了{len(image_attachments)}张图片]"
-            history_user_msg = {"role": "user", "content": f"{text_content} {img_desc}"}
+            history_parts = [text_content]
+            for att in image_attachments:
+                if att.metadata and "workspace_ref" in att.metadata:
+                    uid = att.metadata.get("user_id", user_id)
+                    ref = att.metadata["workspace_ref"]
+                    history_parts.append(f"[workspace_image:{uid}:{ref}]")
+                else:
+                    history_parts.append(f"[包含了一张图片，未持久化]")
+            history_user_msg = {"role": "user", "content": " ".join(history_parts)}
         else:
             history_user_msg = user_msg
         history.append(history_user_msg)

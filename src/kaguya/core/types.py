@@ -39,6 +39,7 @@ class Attachment:
     filename: Optional[str] = None  # 文件名
     mime_type: Optional[str] = None
     data: Optional[str] = None  # base64 编码数据（如微信图片的 img_buf）
+    metadata: Optional[dict] = None  # 额外元数据（如 workspace_ref、user_id）
 
 
 @dataclass

@@ -35,7 +35,7 @@ async def run_cli():
     from kaguya.llm.embedding import EmbeddingClient
     from kaguya.memory.database import Database
     from kaguya.memory.middleware import MemoryMiddleware
-    from kaguya.memory.retriever import MemoryRetriever
+    from kaguya.memory.topic_manager import TopicManager
 
     # 1. 加载配置
     config = load_config()
@@ -60,16 +60,15 @@ async def run_cli():
 
     # 5. 初始化记忆系统
     embed_client = EmbeddingClient(config.llm.embedding)
-    retriever = MemoryRetriever(
+    topic_manager = TopicManager(
         db=db,
         embed_client=embed_client,
         secondary_llm=secondary_llm,
-        vectorize_threshold=config.memory.vectorize_threshold,
     )
     memory_mw = MemoryMiddleware(
         db=db,
-        retriever=retriever,
-        top_k=config.memory.retrieval_top_k,
+        topic_manager=topic_manager,
+        top_k=config.memory.vectorize_threshold,
     )
 
     # 6. 初始化工具系统
@@ -82,9 +81,30 @@ async def run_cli():
     builtin_tools = create_builtin_tools(
         workspace=workspace,
         db=db,
-        retriever=retriever,
     )
     tool_registry.register_all(builtin_tools)
+
+    # 6b. 注册记忆话题工具
+    from kaguya.tools.memory_tools import MemoryTools
+    from kaguya.tools.registry import Tool
+
+    memory_tools_instance = MemoryTools(db=db, embed_client=embed_client)
+
+    def _make_mem_tool(td: dict, bound_fn) -> Tool:
+        """工厂函数：为每个记忆工具创建一个独立的 Tool 实例，避免闭包变量捕获问题"""
+        class _MemTool(Tool):
+            @property
+            def name(self): return td["function"]["name"]
+            @property
+            def description(self): return td["function"]["description"]
+            @property
+            def parameters(self): return td["function"]["parameters"]
+            async def execute(self, **kwargs): return await bound_fn(**kwargs)
+        return _MemTool()
+
+    for _td in MemoryTools.TOOL_DEFINITIONS:
+        _fn = getattr(memory_tools_instance, _td["function"]["name"])
+        tool_registry.register(_make_mem_tool(_td, _fn))
 
     # 6b. 初始化浏览器工具（可选，按配置启用）
     browser_toolkit = None
@@ -98,6 +118,10 @@ async def run_cli():
             headless=config.browser.headless,
             cloud_proxy_country=config.browser.cloud_proxy_country,
             api_key=config.browser.api_key,
+            # 主模型配置，供 browser_task 默认复用
+            primary_model=config.llm.primary.model,
+            primary_base_url=config.llm.primary.base_url,
+            primary_api_key=config.llm.primary.api_key,
         )
         tool_registry.register_all(browser_toolkit.get_tools())
         logger.info(f"浏览器工具已注册 (模式: {config.browser.mode})")
@@ -122,6 +146,7 @@ async def run_cli():
         config=config,
         primary_llm=primary_llm,
         tool_registry=tool_registry,
+        workspace=workspace,
     )
     # 注册中间件（顺序重要：群聊过滤 → 记忆系统）
     from kaguya.core.group import GroupFilterMiddleware
@@ -138,6 +163,7 @@ async def run_cli():
         wechat_adapter = WeChatAdapter(
             config=config.wechat,
             identity_manager=identity_mgr,
+            workspace=workspace,
         )
         wechat_adapter.set_handler(engine.handle_message)
 

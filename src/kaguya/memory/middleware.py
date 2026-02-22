@@ -1,43 +1,80 @@
 """
-记忆中间件 — 将记忆系统集成到 ChatEngine 中。
+记忆中间件 — 将话题化记忆系统集成到 ChatEngine 中。
 """
 
 from __future__ import annotations
 
 import asyncio
-import json
 
 from loguru import logger
 
 from kaguya.core.middleware import Middleware
 from kaguya.core.types import UnifiedMessage
 from kaguya.memory.database import Database
-from kaguya.memory.retriever import MemoryRetriever
+from kaguya.memory.topic_manager import TopicManager
+
+# 触发归档的未归档消息阈值
+ARCHIVE_THRESHOLD = 10
+
+# 注入上下文时，最多显示的未归档消息条数
+MAX_UNARCHIVED_IN_CONTEXT = 20
+
+
+def _format_topic_list(topics: list[dict]) -> str:
+    """格式化话题标题列表（轻量，始终注入）"""
+    if not topics:
+        return ""
+    lines = [f"  - [{t['title']}]（{t['updated_at'][:16]}，共{t['message_count']}条）" for t in topics]
+    return "你与该用户共有以下记忆话题：\n" + "\n".join(lines)
+
+
+def _format_topic_summary(topic: dict, label: str) -> str:
+    """格式化单个话题的完整摘要"""
+    return (
+        f"【{label}】话题「{topic['title']}」摘要：\n"
+        f"{topic['summary'][:2000]}"  # 最多 2000 字，避免单个话题撑爆 context
+    )
+
+
+def _format_unarchived(messages: list[dict]) -> str:
+    """格式化未归档的原始消息（保持对话连贯性）"""
+    if not messages:
+        return ""
+    lines = []
+    for m in messages:
+        role_label = "用户" if m["role"] == "user" else "你"
+        content = (m.get("display_content") or m["content"])[:200]
+        lines.append(f"  [{m['created_at'][11:16]}] {role_label}: {content}")
+    return "最近尚未归档的对话（保持连贯性）：\n" + "\n".join(lines)
 
 
 class MemoryMiddleware(Middleware):
     """
-    记忆中间件。
+    话题化记忆中间件。
 
-    前置处理 (pre_process):
-        1. 将用户消息保存到数据库
-        2. 检索相关历史记忆
-        3. 返回记忆内容注入到系统提示语
+    前置处理 (pre_process)：
+        1. 保存用户消息到数据库
+        2. 获取所有话题标题列表（轻量）
+        3. 获取最近更新的 1 个话题摘要（时间连续性）
+        4. 获取未归档消息列表（连贯性）
+        5. 合并注入 System Prompt
 
-    后置处理 (post_process):
-        1. 将辉夜姬的回复保存到数据库
-        2. 异步触发向量化检查
+    后置处理 (post_process)：
+        1. 保存辉夜姬的回复到数据库
+        2. 异步触发话题归档（累积 10 条未归档时）
     """
 
-    def __init__(self, db: Database, retriever: MemoryRetriever, top_k: int = 5):
+    def __init__(
+        self,
+        db: Database,
+        topic_manager: TopicManager,
+        top_k: int = ARCHIVE_THRESHOLD,
+    ):
         self.db = db
-        self.retriever = retriever
-        self.top_k = top_k
+        self.topic_manager = topic_manager
+        self.archive_threshold = top_k
 
     async def pre_process(self, message: UnifiedMessage) -> str | None:
-        """
-        保存用户消息 & 检索相关记忆。
-        """
         user_id = message.sender.user_id
 
         # 1. 保存用户消息
@@ -48,36 +85,56 @@ class MemoryMiddleware(Middleware):
             content=message.content,
         )
 
-        # 2. 检索相关记忆
-        memories = await self.retriever.retrieve(
-            user_id=user_id,
-            query=message.content,
-            top_k=self.top_k,
-        )
+        # 2. 所有话题标题列表（始终注入，轻量）
+        all_topics = await self.db.get_all_topics(user_id)
 
-        if not memories:
+        # 3. 最近更新的 1 个话题（完整摘要）
+        recent_topics = await self.db.get_recent_updated_topics(user_id, n=1)
+        recent_topic = recent_topics[0] if recent_topics else None
+
+        # 4. 未归档消息（保持连贯性）
+        unarchived = await self.db.get_unarchived_messages(user_id)
+        unarchived = unarchived[-MAX_UNARCHIVED_IN_CONTEXT:]
+
+        # 5. 笔记标题列表：当前用户的笔记 + kaguya 的笔记
+        user_notes = await self.db.get_notes_by_owner(user_id, limit=10)
+        kaguya_notes = await self.db.get_notes_by_owner("kaguya", limit=10)
+
+        # 6. 拼装上下文
+        parts = []
+
+        topic_list_text = _format_topic_list(all_topics)
+        if topic_list_text:
+            parts.append(topic_list_text)
+
+        if recent_topic:
+            parts.append(_format_topic_summary(recent_topic, "最近更新的话题"))
+
+        unarchived_text = _format_unarchived(unarchived)
+        if unarchived_text:
+            parts.append(unarchived_text)
+
+        # 笔记标题列表（两个 owner）
+        note_lines = []
+        if user_notes:
+            note_lines.append(f"  [{user_id} 的笔记]")
+            for n in user_notes:
+                tag_str = f" #{n['tags']}" if n.get("tags") else ""
+                note_lines.append(f"    [ID:{n['id']}] {n['title'] or '(\u65e0\u6807\u9898)'}{tag_str}（{n['updated_at'][:16]}）")
+        if kaguya_notes:
+            note_lines.append("  [我的私人笔记]")
+            for n in kaguya_notes:
+                tag_str = f" #{n['tags']}" if n.get("tags") else ""
+                note_lines.append(f"    [ID:{n['id']}] {n['title'] or '(\u65e0\u6807\u9898)'}{tag_str}（{n['updated_at'][:16]}）")
+        if note_lines:
+            parts.append("笔记本（可用 manage_notes 工具读取内容）：\n" + "\n".join(note_lines))
+
+        if not parts:
             return None
 
-        # 3. 格式化记忆为提示语
-        memory_lines = []
-        for m in memories:
-            role_label = "用户" if m["role"] == "user" else "你"
-            content = m.get("display_content") or m["content"]
-            # 截断过长的记忆
-            if len(content) > 300:
-                content = content[:300] + "..."
-            memory_lines.append(f"  [{m['created_at']}] {role_label}: {content}")
-
-        return (
-            "以下是你回忆起的与当前话题相关的历史对话片段，"
-            "你可以参考这些记忆来更好地回复：\n"
-            + "\n".join(memory_lines)
-        )
+        return "\n\n".join(parts)
 
     async def post_process(self, message: UnifiedMessage, replies: list[str]) -> None:
-        """
-        保存辉夜姬的回复 & 异步检查是否需要向量化。
-        """
         user_id = message.sender.user_id
 
         # 保存辉夜姬的回复
@@ -91,12 +148,14 @@ class MemoryMiddleware(Middleware):
                 display_content=display,
             )
 
-        # 异步触发向量化（不阻塞回复）
-        asyncio.create_task(self._safe_vectorize(user_id))
+        # 异步触发话题归档（不阻塞回复）
+        asyncio.create_task(self._safe_archive(user_id))
 
-    async def _safe_vectorize(self, user_id: str) -> None:
-        """安全地执行向量化，捕获异常"""
+    async def _safe_archive(self, user_id: str) -> None:
+        """安全地执行话题归档，捕获异常"""
         try:
-            await self.retriever.check_and_vectorize(user_id)
+            count = await self.db.get_unarchived_count(user_id)
+            if count >= self.archive_threshold:
+                await self.topic_manager.archive_messages(user_id)
         except Exception as e:
-            logger.error(f"后台向量化异常: {e}")
+            logger.error(f"后台话题归档异常: {e}")

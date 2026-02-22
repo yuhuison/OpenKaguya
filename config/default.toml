@@ -4,7 +4,7 @@
 # 主模型：用于生成回复、执行工具调用、执行复杂逻辑
 provider = "openai"
 base_url = "https://coding-intl.dashscope.aliyuncs.com/v1"
-model = "kimi-k2.5"
+model = "glm-4.7"
 temperature = 0.7
 max_tokens = 8192
 reasoning_effort = "none"
@@ -40,8 +40,8 @@ enabled = true
 heartbeat_interval_minutes = 30
 jitter_seconds = 300
 # 静默时段（不主动打扰用户）
-quiet_hours_start = "23:00"
-quiet_hours_end = "08:00"
+quiet_hours_start = "02:00"
+quiet_hours_end = "12:00"
 
 [browser]
 # 浏览器模式: "local" / "cloud" / "cdp"

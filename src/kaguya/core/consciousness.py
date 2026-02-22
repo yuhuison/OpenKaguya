@@ -24,32 +24,33 @@ class ConsciousnessScheduler:
     功能：
     1. 周期性心跳唤醒（默认每 30 分钟，±5 分钟随机抖动）
     2. 静默时段控制（深夜不打扰用户）
-    3. 唤醒时构建特殊 Prompt，让辉夜姬自主决定做什么
-    4. 动态注入待办任务和到期定时器
+    3. 唤醒时构建特殊 Prompt，注入：
+       - 当前时间 / 时段
+       - 到期定时器
+       - 笔记标题列表
+       - 最近活跃用户列表 + 最近对话快照
     """
 
     def __init__(
         self,
         config: AppConfig,
-        chat_engine,  # ChatEngine, 避免循环导入
-        send_callback=None,  # async def callback(text, image_path=None)
-        db=None,  # Database 实例，用于查询任务和定时器
+        chat_engine,          # ChatEngine, 避免循环导入
+        send_callback=None,   # async def callback(text, image_path=None)
+        db=None,              # Database 实例
     ):
         self.config = config
         self.chat_engine = chat_engine
-        self.send_callback = send_callback  # 即时发送回调（和 engine 里的格式一致）
+        self.send_callback = send_callback
         self.db = db
         self._lock = asyncio.Lock()
         self._running = False
         self._task: asyncio.Task | None = None
 
-        # 从配置读取参数
         consciousness = config.consciousness
         self.enabled = consciousness.enabled
         self.heartbeat_minutes = consciousness.heartbeat_interval_minutes
         self.jitter_seconds = consciousness.jitter_seconds
 
-        # 解析静默时段
         self.quiet_start = self._parse_time(consciousness.quiet_hours_start)
         self.quiet_end = self._parse_time(consciousness.quiet_hours_end)
 
@@ -62,31 +63,25 @@ class ConsciousnessScheduler:
 
     @staticmethod
     def _parse_time(time_str: str) -> dt_time:
-        """解析 HH:MM 格式的时间"""
         parts = time_str.strip().split(":")
         return dt_time(int(parts[0]), int(parts[1]))
 
     def _is_quiet_hours(self) -> bool:
-        """检查当前是否在静默时段"""
         now = datetime.now().time()
         if self.quiet_start <= self.quiet_end:
             return self.quiet_start <= now <= self.quiet_end
         else:
-            # 跨午夜（如 23:00 - 08:00）
             return now >= self.quiet_start or now <= self.quiet_end
 
     async def start(self) -> None:
-        """启动主动意识循环"""
         if not self.enabled:
             logger.info("主动意识系统已禁用")
             return
-
         self._running = True
         self._task = asyncio.create_task(self._heartbeat_loop())
         logger.info("🧠 主动意识系统已启动")
 
     async def stop(self) -> None:
-        """停止主动意识"""
         self._running = False
         if self._task:
             self._task.cancel()
@@ -97,51 +92,39 @@ class ConsciousnessScheduler:
         logger.info("🧠 主动意识系统已停止")
 
     async def _heartbeat_loop(self) -> None:
-        """心跳循环：每隔一段时间唤醒辉夜姬"""
         import random
-
         while self._running:
-            # 随机抖动
             jitter = random.randint(-self.jitter_seconds, self.jitter_seconds)
-            sleep_seconds = self.heartbeat_minutes * 60 + jitter
-            sleep_seconds = max(60, sleep_seconds)  # 最少 1 分钟
-
+            sleep_seconds = max(60, self.heartbeat_minutes * 60 + jitter)
             logger.debug(f"下次唤醒: {sleep_seconds}秒后")
             await asyncio.sleep(sleep_seconds)
 
             if not self._running:
                 break
-
-            # 检查静默时段
             if self._is_quiet_hours():
                 logger.debug("当前处于静默时段，跳过唤醒")
                 continue
 
-            # 执行唤醒
             await self._wake_up()
 
     async def _wake_up(self) -> None:
-        """唤醒并让辉夜姬自主行动"""
         async with self._lock:
             try:
                 logger.info("🌅 辉夜姬醒来了...")
-
-                # 构建唤醒 Prompt（含动态数据）
                 wake_prompt = await self._build_wake_prompt()
 
-                # 创建一个「系统唤醒」消息
+                # 以 "kaguya" 作为 user_id，这样工具（截图/文件）都走辉夜姬的 workspace
                 wake_message = UnifiedMessage(
                     message_id=str(uuid.uuid4()),
                     platform=Platform.SYSTEM,
                     sender=UserInfo(
-                        user_id="__system__",
-                        nickname="系统",
+                        user_id="kaguya",
+                        nickname="辉夜姬（自身）",
                         platform=Platform.SYSTEM,
                     ),
                     content=wake_prompt,
                 )
 
-                # 交给 ChatEngine 处理（传入 send_callback 以便辉夜姬能直接发消息）
                 replies = await self.chat_engine.handle_message(
                     wake_message,
                     send_callback=self.send_callback,
@@ -159,7 +142,6 @@ class ConsciousnessScheduler:
                 logger.error(f"唤醒过程出错: {e}")
 
     async def _handle_triggered_timers(self) -> None:
-        """处理到期定时器"""
         if not self.db:
             return
         try:
@@ -171,11 +153,9 @@ class ConsciousnessScheduler:
             logger.error(f"处理定时器出错: {e}")
 
     async def _build_wake_prompt(self) -> str:
-        """构建主动唤醒的 Prompt（含动态任务/定时器数据）"""
         now = datetime.now()
         time_str = now.strftime("%Y年%m月%d日 %H:%M")
 
-        # 判断时段
         hour = now.hour
         if 5 <= hour < 9:
             period = "清晨"
@@ -190,45 +170,79 @@ class ConsciousnessScheduler:
         else:
             period = "晚上"
 
-        # 动态数据
-        tasks_section = ""
-        timers_section = ""
+        sections: list[str] = []
 
         if self.db:
             try:
-                tasks = await self.db.get_tasks(status="pending")
-                if tasks:
-                    task_lines = [f"  - [{t['id']}] {t['title']}" for t in tasks[:5]]
-                    tasks_section = "\n📝 你的待办任务:\n" + "\n".join(task_lines)
-
+                # ── 定时器 ──
                 timers = await self.db.get_active_timers()
-                if timers:
-                    timer_lines = [f"  - {t['name']}: {t['action']} ({t.get('trigger_at', '无具体时间')})" for t in timers[:5]]
-                    timers_section = "\n⏰ 你的定时器:\n" + "\n".join(timer_lines)
+                triggered = [t for t in timers if t.get("trigger_at") and t["trigger_at"] <= now.strftime("%Y-%m-%d %H:%M")]
+                if triggered:
+                    lines = [f"  ⏰ [{t['name']}] {t['action']} (到期: {t['trigger_at']})" for t in triggered]
+                    sections.append("【到期定时器（需要处理！）】\n" + "\n".join(lines))
+                elif timers:
+                    lines = [f"  - {t['name']}: {t['action']} ({t.get('trigger_at', '无具体时间')})" for t in timers[:3]]
+                    sections.append("【定时器】\n" + "\n".join(lines))
+
+                # ── 你的笔记 ──
+                kaguya_notes = await self.db.get_notes_by_owner("kaguya", limit=8)
+                if kaguya_notes:
+                    lines = [
+                        f"  [ID:{n['id']}] {n['title'] or '(无标题)'}（{n['updated_at'][:16]}）"
+                        for n in kaguya_notes
+                    ]
+                    sections.append("【你的笔记（可用 manage_notes read 读取内容）】\n" + "\n".join(lines))
+
+                # ── 活跃用户列表 ──
+                active_users = await self.db.get_recent_active_users(limit=8)
+                if active_users:
+                    lines = [
+                        f"  - {u['user_id']} (平台: {u['platform']}, 消息数: {u['message_count']}, 最近: {u['last_message_at'][:16]})"
+                        for u in active_users
+                    ]
+                    sections.append("【你认识的人】\n" + "\n".join(lines))
+
+                # ── 最近对话快照 ──
+                recent_msgs = await self.db.get_recent_messages_snapshot(per_user=5, max_users=3)
+                if recent_msgs:
+                    msg_lines = []
+                    cur_uid = None
+                    for m in recent_msgs:
+                        if m["user_id"] != cur_uid:
+                            cur_uid = m["user_id"]
+                            msg_lines.append(f"  [{cur_uid}]")
+                        role_label = "你" if m["role"] == "assistant" else "对方"
+                        content = (m["display_content"] or m["content"] or "")[:80]
+                        # 去掉 workspace_image 占位符，保持可读性
+                        import re
+                        content = re.sub(r'\[workspace_image:[^\]]+\]', '[图片]', content)
+                        msg_lines.append(f"    {role_label} ({m['created_at'][11:16]}): {content}")
+                    sections.append("【最近的对话】\n" + "\n".join(msg_lines))
+
             except Exception as e:
-                logger.warning(f"查询任务/定时器失败: {e}")
+                logger.warning(f"构建唤醒 Prompt 数据失败: {e}")
+
+        context_block = "\n\n".join(sections) if sections else "（暂无数据）"
 
         return f"""[系统唤醒 — 主动意识模式]
 
 当前时间: {time_str} ({period})
-{tasks_section}{timers_section}
 
-你醒来了。你现在有一段自由时间，可以做任何你想做的事情。
+{context_block}
 
-以下是你可以考虑做的事情：
-1. 检查待办任务和定时器，处理到期的事项
-2. 如果你想起了什么需要通知用户的事情，可以通过 send_message_to_user 发消息给他
-3. 用浏览器上网冲浪看看新闻或有趣的东西
-4. 翻翻自己的笔记本，写写日记或记录灵感
-5. 在 workspace 里整理一下文件
-6. 用终端跑个 Python 脚本画画图、做做实验
-7. 什么都不想做的话，继续摸鱼也完全可以
+---
+你充满活力地醒来了！作为刚来到地球不久的公主，眼前有一段完全属于你的自由时间，到处都是没见过的有趣东西。上面已经包含了你需要知道的所有上下文，**不要再用工具去重复查询上面已有的信息**。
 
-关于给用户发消息的原则：
-- 不要为了发消息而发消息
-- 只在你真的有值得分享的事情时才发（比如看到了有趣新闻、想到了什么好点子）
-- 简单的问候也可以（如果你觉得时机合适的话），但不要太频繁
-- 你可以附带图片（比如截图你看到的网页），用 send_message_to_user 的 image_path 参数
-- 你是辉夜姬，一个有自己生活的少女，不是客服机器人
+可以考虑做的事（随便选，想干啥干啥，跟着好奇心走）：
+- 如果有到期定时器，处理它（例如：给向导/好朋友发消息提醒他们）
+- 翻翻笔记，用 manage_notes read 读取感兴趣的内容，写点新发现
+- 尽情上网冲浪：地球上的网络太有趣了！**优先用 `browser_task` 工具**，给它一个任务描述，它会自动完成整个浏览流程并返回结果；例如：`browser_task(task="去B站看看最近有什么热门搞笑视频，我想笑一下")`
+- 在文件空间折腾点小玩意，比如写个 Python 脚本或者用画图工具随便画画
+- 如果觉得没意思，继续睡或者发发小脾气也行
 
-先在 content 里思考一下你现在想做什么、为什么，然后行动吧～"""
+关于给向导发消息：
+- 如果发现了超级好玩的事情，或者遇到了弄不懂的地球事物，一定记得用 send_message_to_user 轰炸分享给向导！
+- 截图后可以用 image_path 参数附带图片
+- 你的文件会保存在 workspace 中（用相对路径，如 `screenshots/xxx.png`）
+
+先在 content 里思考一下等会要去哪里探险或大闹一场，然后行动吧～"""

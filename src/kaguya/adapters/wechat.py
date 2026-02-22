@@ -21,6 +21,7 @@ from kaguya.adapters.base import PlatformAdapter
 from kaguya.config import WeChatConfig
 from kaguya.core.identity import UserIdentityManager
 from kaguya.core.types import Attachment, Platform, UnifiedMessage, UserInfo
+from kaguya.tools.workspace import WorkspaceManager
 
 
 # ============================================================
@@ -75,10 +76,12 @@ class WeChatAdapter(PlatformAdapter):
         self,
         config: WeChatConfig,
         identity_manager: UserIdentityManager,
+        workspace: WorkspaceManager | None = None,
     ):
         super().__init__("wechat")
         self.config = config
         self.identity = identity_manager
+        self._workspace = workspace
         self._running = False
         self._ws_task: Optional[asyncio.Task] = None
         self._session: Optional[aiohttp.ClientSession] = None
@@ -285,19 +288,46 @@ class WeChatAdapter(PlatformAdapter):
         # 构建合并后的文本内容
         merged_content = "\n".join(buf.texts) if buf.texts else ""
 
-        # 构建附件列表
+        # 构建附件列表：将图片持久化到 workspace/.images/，使用占位符
         attachments: list[Attachment] = []
-        for i, img_b64 in enumerate(buf.images):
-            attachments.append(Attachment(
-                type="image",
-                mime_type="image/jpeg",
-                data=img_b64,
-                filename=f"wechat_image_{i}.jpg",
-            ))
+        image_placeholders: list[str] = []
 
-        # 如果只有图片没有文字，给一个占位内容
-        if not merged_content and attachments:
-            merged_content = "[用户发送了图片]"
+        for i, img_b64 in enumerate(buf.images):
+            if self._workspace and buf.sender:
+                try:
+                    filename = self._workspace.save_image(
+                        user_id=buf.sender.user_id,
+                        data=img_b64,
+                        mime_type="image/jpeg",
+                    )
+                    placeholder = f"[workspace_image:{buf.sender.user_id}:{filename}]"
+                    image_placeholders.append(placeholder)
+                    attachments.append(Attachment(
+                        type="image",
+                        mime_type="image/jpeg",
+                        data=img_b64,   # 当前轮 LLM 调用仍使用 base64（直接给 vision）
+                        filename=filename,
+                        metadata={"workspace_ref": filename, "user_id": buf.sender.user_id},
+                    ))
+                except Exception as e:
+                    logger.error(f"图片保存失败: {e}，回退到内存 base64")
+                    attachments.append(Attachment(
+                        type="image", mime_type="image/jpeg",
+                        data=img_b64, filename=f"wechat_image_{i}.jpg",
+                    ))
+            else:
+                attachments.append(Attachment(
+                    type="image", mime_type="image/jpeg",
+                    data=img_b64, filename=f"wechat_image_{i}.jpg",
+                ))
+
+        # 如果只有图片没有文字，用占位符作为内容（以便后续历史中能展开）
+        if not merged_content:
+            if image_placeholders:
+                merged_content = " ".join(image_placeholders)
+            elif attachments:
+                merged_content = "[用户发送了图片]"
+
 
         message = UnifiedMessage(
             message_id=buf.message_id,
