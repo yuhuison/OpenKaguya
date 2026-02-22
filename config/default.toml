@@ -37,8 +37,8 @@ retrieval_top_k = 5
 [consciousness]
 # 主动意识调度
 enabled = true
-heartbeat_interval_minutes = 30
-jitter_seconds = 300
+heartbeat_interval_minutes = 120
+jitter_seconds = 1200
 # 静默时段（不主动打扰用户）
 quiet_hours_start = "02:00"
 quiet_hours_end = "12:00"
