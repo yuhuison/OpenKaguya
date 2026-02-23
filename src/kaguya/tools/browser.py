@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
 from pathlib import Path
 from urllib.parse import quote
@@ -114,8 +115,6 @@ class BrowserToolkit:
     def get_tools(self) -> list[Tool]:
         """获取所有浏览器工具"""
         return [
-            # BrowserRunTaskTool 已移除：ChatOpenAI 兼容性问题频繁出错，
-            # 复杂搜索任务由 web_search 工具替代
             BrowserOpenTool(self),
             BrowserSearchTool(self),
             BrowserClickTool(self),
@@ -132,105 +131,7 @@ class BrowserToolkit:
 # ========================= 浏览器工具实现 =========================
 
 
-class BrowserRunTaskTool(Tool):
-    """
-    用自然语言描述一个浏览任务，browser-use Agent 会自动完成整个浏览流程并返回结果。
 
-    适合委托复杂任务：搜索、阅读文章、收集信息等。
-    """
-
-    def __init__(self, toolkit: BrowserToolkit):
-        self._tk = toolkit
-
-    @property
-    def name(self): return "browser_task"
-
-    @property
-    def description(self):
-        return (
-            "【首选】用自然语言描述一个浏览任务，AI 代理会自动完成整个浏览流程并返回结果。"
-            "适合搜索、阅读网页、收集信息等复杂任务，远比自己一步步 open/click/get_text 更高效。"
-            "示例：browser_task(task=\"去微博热搜看看今天什么最火，返回前5条\")"
-        )
-
-    @property
-    def parameters(self):
-        return {
-            "type": "object",
-            "properties": {
-                "task": {
-                    "type": "string",
-                    "description": "用自然语言描述任务，尽量具体说明想要获取的信息和期望输出格式"
-                },
-                "llm_model": {
-                    "type": "string",
-                    "description": "可选，指定代理使用的模型名（默认使用系统配置）"
-                },
-            },
-            "required": ["task"],
-        }
-
-    async def execute(self, task: str, llm_model: str = "", **_) -> str:
-        try:
-            from browser_use import Agent
-            from langchain_openai import ChatOpenAI
-            import os
-
-            # 优先级：调用旹指定 > BrowserToolkit 配置的主模型 > 环境变量
-            model_name = (
-                llm_model
-                or self._tk.primary_model
-                or os.environ.get("BROWSER_TASK_MODEL", "")
-            )
-            base_url = (
-                self._tk.primary_base_url
-                or os.environ.get("BROWSER_TASK_BASE_URL")
-                or os.environ.get("OPENAI_BASE_URL")
-            )
-            api_key = (
-                self._tk.primary_api_key
-                or os.environ.get("BROWSER_TASK_API_KEY")
-                or os.environ.get("OPENAI_API_KEY", "")
-            )
-
-            if not model_name:
-                return (
-                    "错误：未配置 browser_task 使用的模型。"
-                    "请在 BrowserToolkit 中传入 primary_model，"
-                    "或设置环境变量 BROWSER_TASK_MODEL。"
-                )
-
-            llm_kwargs: dict = {"model": model_name, "api_key": api_key or "placeholder"}
-            if base_url:
-                llm_kwargs["base_url"] = base_url
-            llm = ChatOpenAI(**llm_kwargs)
-
-            # 如果已有浏览器实例（包括 cloud 模式），传入共用；否则 Agent 自己创建
-            await self._tk._ensure_browser()
-            agent = Agent(
-                task=task,
-                llm=llm,
-                browser=self._tk._browser,
-            )
-
-            result = await agent.run()
-            if hasattr(result, "final_result"):
-                final = result.final_result()
-            elif isinstance(result, list):
-                final = str(result[-1]) if result else ""
-            else:
-                final = str(result)
-
-            return final or "任务已完成，但无返回结果"
-
-        except ImportError:
-            return (
-                "browser_task 不可用（browser-use 或 langchain-openai 未安装）。"
-                "如果你只是想搜索信息，请改用 web_search 工具；"
-                "如果需要手动浏览网页，可以用 browser_open + browser_get_text。"
-            )
-        except Exception as e:
-            return f"浏览器任务执行失败: {e}。如果只是搜索信息，建议改用 web_search 工具。"
 
 
 class BrowserOpenTool(Tool):
@@ -257,6 +158,7 @@ class BrowserOpenTool(Tool):
         try:
             page = await self._tk._ensure_page()
             await page.goto(url)
+
             # 刷新 page 引用（cloud 模式下 goto 后可能切换了内部 tab）
             try:
                 fresh = await self._tk._browser.get_current_page()
@@ -265,6 +167,21 @@ class BrowserOpenTool(Tool):
                     page = fresh
             except Exception:
                 pass
+
+            # 等待页面加载完成（cloud 模式下 goto 可能异步返回，
+            # 需要轮询确认导航已完成）
+            for _ in range(30):  # 最多等待 15 秒
+                try:
+                    current_url = await page.get_url()
+                    if current_url and current_url != "about:blank":
+                        break
+                except Exception:
+                    pass
+                await asyncio.sleep(0.5)
+
+            # 额外等待渲染完成
+            await asyncio.sleep(2)
+
             title = await page.get_title()
             current_url = await page.get_url()
             return f"已打开页面: {title}\nURL: {current_url}"
@@ -430,6 +347,16 @@ class BrowserScreenshotTool(Tool):
     async def execute(self, **_) -> str:
         try:
             page = await self._tk._get_current_page()
+
+            # 确保页面已渲染（cloud 模式下远程浏览器可能有延迟）
+            try:
+                current_url = await page.get_url()
+                if current_url and current_url != "about:blank":
+                    # 等待页面渲染稳定
+                    await asyncio.sleep(1)
+            except Exception:
+                pass
+
             filename = f"screenshot_{int(time.time())}.png"
             filepath = self._tk.screenshot_dir / filename
             screenshot_data = await page.screenshot(format="png")
