@@ -37,10 +37,9 @@ class ConsciousnessScheduler:
         self,
         config: AppConfig,
         chat_engine,          # ChatEngine, 避免循环导入
-        send_callback=None,   # async def callback(text, image_path=None)
+        send_callback=None,   # async def callback(text, image_path=None, target_user_id=None)
         db=None,              # Database 实例
         secondary_llm=None,   # LLMClient (次级模型, 用于行动总结)
-        target_user_id: str = "",  # 消息发送目标用户 ID
         adapters: list | None = None,  # PlatformAdapter 列表
         providers: list | None = None,  # BaseProvider 列表
     ):
@@ -49,7 +48,6 @@ class ConsciousnessScheduler:
         self._raw_send_callback = send_callback
         self.db = db
         self.secondary_llm = secondary_llm
-        self.target_user_id = target_user_id
         self._adapters = adapters or []
         self._providers = providers or []
         self._lock = asyncio.Lock()
@@ -141,15 +139,25 @@ class ConsciousnessScheduler:
                 # 1. 构建唤醒 prompt
                 wake_prompt = await self._build_wake_prompt()
 
-                # 2. 追踪本次发送的消息
-                sent_messages: list[dict] = []  # [{"text": ..., "image_path": ...}]
+                # 2. 追踪本次发送的消息（含目标用户）
+                sent_messages: list[dict] = []  # [{"text": ..., "image_path": ..., "target_user_id": ...}]
 
-                async def _tracking_callback(text: str, image_path: str | None = None):
-                    """包装发送回调：记录发出的消息"""
+                async def _tracking_callback(
+                    text: str, image_path: str | None = None,
+                    target_user_id: str | None = None, **_
+                ):
+                    """包装发送回调：记录发出的消息及其目标用户"""
                     if text or image_path:
-                        sent_messages.append({"text": text or "", "image_path": image_path})
+                        sent_messages.append({
+                            "text": text or "",
+                            "image_path": image_path,
+                            "target_user_id": target_user_id or "",
+                        })
                     if self._raw_send_callback:
-                        await self._raw_send_callback(text, image_path)
+                        await self._raw_send_callback(
+                            text, image_path=image_path,
+                            target_user_id=target_user_id,
+                        )
 
                 # 3. 执行主动意识（engine 会返回 replies 和 调用的工具信息）
                 wake_message = UnifiedMessage(
@@ -182,6 +190,21 @@ class ConsciousnessScheduler:
             except Exception as e:
                 logger.error(f"唤醒过程出错: {e}")
 
+            finally:
+                # C5: 清理意识阶段专属工具
+                for adapter in self._adapters:
+                    try:
+                        for tool in adapter.get_tools(phase="consciousness"):
+                            self.chat_engine.tool_registry.unregister(tool.name)
+                    except Exception:
+                        pass
+                for prov in self._providers:
+                    try:
+                        for tool in prov.get_tools(phase="consciousness"):
+                            self.chat_engine.tool_registry.unregister(tool.name)
+                    except Exception:
+                        pass
+
     # ─── 后处理：消息同步 + 行动日志 ───
 
     async def _post_process(self, sent_messages: list[dict], replies: list[str]) -> None:
@@ -194,48 +217,66 @@ class ConsciousnessScheduler:
         if not self.db:
             return
 
-        target_uid = self.target_user_id
-        if not target_uid:
+        # 动态确定目标用户：优先从发送记录中提取，否则取最近活跃用户
+        target_uids: set[str] = set()
+        for msg in sent_messages:
+            uid = msg.get("target_user_id", "")
+            if uid:
+                target_uids.add(uid)
+        if not target_uids:
+            # 没有明确目标，尝试用最近活跃用户
+            try:
+                active_users = await self.db.get_recent_active_users(limit=1)
+                if active_users:
+                    target_uids.add(active_users[0]["user_id"])
+            except Exception:
+                pass
+        if not target_uids:
             return
 
-        # ── 1. 同步发送的消息到用户历史 ──
-        for msg in sent_messages:
-            text = msg["text"]
-            img = msg.get("image_path")
-            content = text
-            if img:
-                content += f"\n[附带图片: {img}]"
-            if content:
-                await self.db.save_message(
-                    user_id=target_uid,
-                    platform="system",
-                    role="assistant",
-                    content=content,
-                    display_content=text,
-                )
-        logger.debug(f"已同步 {len(sent_messages)} 条消息到用户 {target_uid} 的历史")
+        # 按目标用户分组同步消息
+        for target_uid in target_uids:
+            # 筛选该用户的消息
+            user_msgs = [m for m in sent_messages if m.get("target_user_id") == target_uid]
+            for msg in user_msgs:
+                text = msg["text"]
+                img = msg.get("image_path")
+                content = text
+                if img:
+                    content += f"\n[附带图片: {img}]"
+                if content:
+                    await self.db.save_message(
+                        user_id=target_uid,
+                        platform="system",
+                        role="assistant",
+                        content=content,
+                        display_content=text,
+                    )
+            if user_msgs:
+                logger.debug(f"已同步 {len(user_msgs)} 条消息到用户 {target_uid} 的历史")
 
-        # ── 2. 生成行动日志（次级模型总结） ──
+        # 生成行动日志
         summary = await self._summarize_action(sent_messages, replies)
         if not summary:
             return
 
-        # ── 3. 存入 consciousness_logs ──
+        # 存入 consciousness_logs
         await self.db.save_consciousness_log(
             summary=summary,
-            target_users=target_uid if sent_messages else "",
+            target_users=",".join(target_uids) if sent_messages else "",
         )
 
-        # ── 4. 作为隐藏消息插入用户历史（用户看不到，但聊天上下文能看到） ──
-        if sent_messages and target_uid:
-            await self.db.save_message(
-                user_id=target_uid,
-                platform="system",
-                role="assistant",
-                content=f"[辉夜姬的行动日志] {summary}",
-                display_content=None,  # display_content 为空 → 不会展示给用户
-            )
-            logger.debug(f"已将行动日志作为隐藏消息插入用户 {target_uid} 的历史")
+        # 作为隐藏消息插入每个目标用户的历史
+        if sent_messages:
+            for target_uid in target_uids:
+                await self.db.save_message(
+                    user_id=target_uid,
+                    platform="system",
+                    role="assistant",
+                    content=f"[辉夜姬的行动日志] {summary}",
+                    display_content=None,
+                )
+                logger.debug(f"已将行动日志作为隐藏消息插入用户 {target_uid} 的历史")
 
     async def _summarize_action(self, sent_messages: list[dict], replies: list[str]) -> str:
         """用次级模型总结本次主动意识行动"""

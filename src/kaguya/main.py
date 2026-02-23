@@ -69,6 +69,7 @@ async def run_cli():
         db=db,
         topic_manager=topic_manager,
         top_k=config.memory.vectorize_threshold,
+        embed_client=embed_client,
     )
 
     # 6. 初始化工具系统
@@ -256,24 +257,23 @@ async def run_cli():
     # 9. 初始化主动意识系统
     from kaguya.core.consciousness import ConsciousnessScheduler
 
-    # 构建主动意识的发送回调（通过微信发给第一个白名单用户）
+    # 构建主动意识的发送回调（支持 target_user_id 路由到正确用户）
     consciousness_send_cb = None
     if wechat_adapter and config.wechat.whitelist_users:
         default_target = config.wechat.whitelist_users[0]
 
-        async def _consciousness_send(text: str, image_path: str | None = None):
-            """主动意识发送回调：发消息给默认用户"""
+        async def _consciousness_send(
+            text: str, image_path: str | None = None,
+            target_user_id: str | None = None, **_
+        ):
+            """主动意识发送回调：按 target_user_id 路由，默认发给第一个白名单用户"""
+            target = target_user_id or default_target
             if text:
-                await wechat_adapter._send_single(default_target, text)
+                await wechat_adapter._send_single(target, text)
             if image_path:
-                await wechat_adapter._send_image(default_target, image_path)
+                await wechat_adapter._send_image(target, image_path)
 
         consciousness_send_cb = _consciousness_send
-
-    # 确定意识系统的目标用户（消息同步 + 日志注入）
-    consciousness_target_user = ""
-    if config.wechat.whitelist_users:
-        consciousness_target_user = config.wechat.whitelist_users[0]
 
     consciousness = ConsciousnessScheduler(
         config=config,
@@ -281,7 +281,6 @@ async def run_cli():
         send_callback=consciousness_send_cb,
         db=db,
         secondary_llm=secondary_llm,
-        target_user_id=consciousness_target_user,
         adapters=all_adapters,
         providers=all_providers,
     )

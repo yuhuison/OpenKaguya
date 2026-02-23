@@ -66,11 +66,14 @@ class ChatEngine:
         # 中间件列表（按注册顺序执行）
         self.middlewares: list[Middleware] = []
 
-        # 简易对话历史（Phase 0 仅内存存储，后续替换为 MemoryManager）
+        # 简易对话历史
         self._histories: dict[str, list[dict]] = {}
 
         # per-conversation 锁：保证同一对话的消息串行处理
         self._locks: dict[str, asyncio.Lock] = {}
+
+        # LRU 上限
+        self._MAX_HISTORY_KEYS = 100
 
         logger.info(f"ChatEngine 初始化完成 (工具: {len(self.tool_registry.tool_names)}个)")
 
@@ -78,6 +81,33 @@ class ChatEngine:
         """注册中间件"""
         self.middlewares.append(middleware)
         logger.debug(f"已注册中间件: {middleware.name}")
+
+    def _get_db(self):
+        """从 MemoryMiddleware 获取 DB 引用（如果存在）"""
+        for mw in self.middlewares:
+            if hasattr(mw, "db"):
+                return mw.db
+        return None
+
+    async def _restore_history_from_db(self, user_id: str, history_key: str):
+        """首次访问时从 DB 恢复近期历史，避免重启后失忆"""
+        db = self._get_db()
+        if not db:
+            self._histories[history_key] = []
+            return
+        try:
+            limit = self.config.memory.short_term_limit
+            recent = await db.get_recent_messages(user_id, limit=limit)
+            history = []
+            for m in recent:
+                content = m.get("display_content") or m["content"]
+                history.append({"role": m["role"], "content": content})
+            self._histories[history_key] = history
+            if history:
+                logger.info(f"从 DB 恢复历史: key={history_key}, {len(history)} 条消息")
+        except Exception as e:
+            logger.warning(f"恢复历史失败: {e}")
+            self._histories[history_key] = []
 
     def _expand_image_placeholders(self, msg: dict) -> dict:
         """
@@ -196,6 +226,10 @@ class ChatEngine:
                         "type": "string",
                         "description": "可选，要附带发送的图片文件路径（如浏览器截图路径）",
                     },
+                    "target_user_id": {
+                        "type": "string",
+                        "description": "可选，目标用户 ID（仅在主动意识阶段使用，普通对话无需填写）",
+                    },
                 },
                 "required": ["content"],
             },
@@ -243,9 +277,13 @@ class ChatEngine:
         history_key: str,
     ) -> list[str]:
         """实际的消息处理逻辑（在 lock 保护下执行）"""
-        # 获取对话历史
+        # 重置当前轮次的 toolkit 激活状态
+        if self._toolkit_router:
+            self._toolkit_router.set_context(history_key)
+
+        # 获取对话历史（首次访问时从 DB 恢复）
         if history_key not in self._histories:
-            self._histories[history_key] = []
+            await self._restore_history_from_db(user_id, history_key)
         history = self._histories[history_key]
         
         # === 0. 执行前置中间件 ===
@@ -392,18 +430,23 @@ class ChatEngine:
                     if tc_name == "send_message_to_user":
                         content = tc_args.get("content", "")
                         image_path = tc_args.get("image_path")
+                        target_uid = tc_args.get("target_user_id")
                         if content:
                             reply_messages.append(content)
-                            # 即时发送（如果有回调）
                             if send_callback:
                                 try:
-                                    await send_callback(content, image_path=image_path)
+                                    await send_callback(
+                                        content, image_path=image_path,
+                                        target_user_id=target_uid,
+                                    )
                                 except Exception as e:
                                     logger.error(f"即时发送失败: {e}")
                         elif image_path and send_callback:
-                            # 只发图片没有文字
                             try:
-                                await send_callback("", image_path=image_path)
+                                await send_callback(
+                                    "", image_path=image_path,
+                                    target_user_id=target_uid,
+                                )
                             except Exception as e:
                                 logger.error(f"即时发送图片失败: {e}")
                         tool_result_content = "Message sent to user successfully."
@@ -421,16 +464,23 @@ class ChatEngine:
                             # 修正后走 send 分支
                             content = tc_args.get("content", "")
                             image_path = tc_args.get("image_path")
+                            target_uid = tc_args.get("target_user_id")
                             if content:
                                 reply_messages.append(content)
                                 if send_callback:
                                     try:
-                                        await send_callback(content, image_path=image_path)
+                                        await send_callback(
+                                            content, image_path=image_path,
+                                            target_user_id=target_uid,
+                                        )
                                     except Exception as e:
                                         logger.error(f"即时发送失败（修正后）: {e}")
                             elif image_path and send_callback:
                                 try:
-                                    await send_callback("", image_path=image_path)
+                                    await send_callback(
+                                        "", image_path=image_path,
+                                        target_user_id=target_uid,
+                                    )
                                 except Exception as e:
                                     logger.error(f"即时发送图片失败（修正后）: {e}")
                             tool_result_content = "Message sent to user successfully."
@@ -516,6 +566,13 @@ class ChatEngine:
                 await mw.post_process(message, reply_messages)
             except Exception as e:
                 logger.error(f"中间件 {mw.name} 后置处理异常: {e}")
+
+        # === 7. LRU 清理 ===
+        if len(self._histories) > self._MAX_HISTORY_KEYS:
+            oldest_key = next(iter(self._histories))
+            del self._histories[oldest_key]
+            self._locks.pop(oldest_key, None)
+            logger.debug(f"LRU 清理: 移除历史 key={oldest_key}")
 
         return reply_messages
 

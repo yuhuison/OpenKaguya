@@ -19,6 +19,9 @@ ARCHIVE_THRESHOLD = 10
 # 注入上下文时，最多显示的未归档消息条数
 MAX_UNARCHIVED_IN_CONTEXT = 20
 
+# 注入上下文时，最多显示的话题标题数
+MAX_TOPICS_IN_CONTEXT = 20
+
 
 def _format_topic_list(topics: list[dict]) -> str:
     """格式化话题标题列表（轻量，始终注入）"""
@@ -68,11 +71,13 @@ class MemoryMiddleware(Middleware):
         self,
         db: Database,
         topic_manager: TopicManager,
-        top_k: int = ARCHIVE_THRESHOLD,
+        top_k: int = 3,
+        embed_client=None,
     ):
         self.db = db
         self.topic_manager = topic_manager
         self.archive_threshold = top_k
+        self.embed_client = embed_client
 
     async def pre_process(self, message: UnifiedMessage) -> str | None:
         user_id = message.sender.user_id
@@ -85,8 +90,9 @@ class MemoryMiddleware(Middleware):
             content=message.content,
         )
 
-        # 2. 所有话题标题列表（始终注入，轻量）
+        # 2. 所有话题标题列表（始终注入，轻量，截断为最多 MAX_TOPICS_IN_CONTEXT 个）
         all_topics = await self.db.get_all_topics(user_id)
+        all_topics = all_topics[:MAX_TOPICS_IN_CONTEXT]
 
         # 3. 最近更新的 1 个话题（完整摘要）
         recent_topics = await self.db.get_recent_updated_topics(user_id, n=1)
@@ -109,6 +115,25 @@ class MemoryMiddleware(Middleware):
 
         if recent_topic:
             parts.append(_format_topic_summary(recent_topic, "最近更新的话题"))
+
+        # 语义召回：基于用户当前消息搜索最相关的话题
+        if self.embed_client and message.content:
+            try:
+                emb = await self.embed_client.embed(message.content)
+                results = await self.db.search_topic_vectors(
+                    emb, top_k=1, user_id=user_id
+                )
+                if results:
+                    sem_topic_id = results[0][0]
+                    # 避免重复注入（如果已经是最近更新话题则跳过）
+                    if not recent_topic or sem_topic_id != recent_topic["id"]:
+                        sem_topic = await self.db.get_topic_by_id(sem_topic_id)
+                        if sem_topic:
+                            parts.append(
+                                _format_topic_summary(sem_topic, "与当前对话相关的话题")
+                            )
+            except Exception as e:
+                logger.warning(f"语义召回失败: {e}")
 
         unarchived_text = _format_unarchived(unarchived)
         if unarchived_text:

@@ -39,6 +39,7 @@ class Database:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.embedding_dim = embedding_dim
         self._conn: sqlite3.Connection | None = None
+        self._write_lock = asyncio.Lock()
 
     async def connect(self) -> None:
         """连接数据库并初始化"""
@@ -158,11 +159,13 @@ class Database:
             );
         """)
 
-        # 话题向量表（只对话题摘要做向量化，不对原始消息）
+        # 话题向量表（user_id 做 partition key，支持按用户隔离搜索）
         try:
             c.execute(
                 f"CREATE VIRTUAL TABLE topic_vectors USING vec0("
-                f"  topic_id TEXT, embedding float[{dim}]"
+                f"  user_id TEXT partition key,"
+                f"  topic_id TEXT,"
+                f"  embedding float[{dim}]"
                 f")"
             )
         except sqlite3.OperationalError:
@@ -180,6 +183,17 @@ class Database:
             """)
         except sqlite3.OperationalError:
             pass
+
+        # FTS5 自动同步触发器（替代手动 INSERT）
+        c.executescript("""
+            CREATE TRIGGER IF NOT EXISTS messages_fts_ai AFTER INSERT ON messages BEGIN
+                INSERT INTO messages_fts(rowid, content) VALUES (new.id, new.content);
+            END;
+            CREATE TRIGGER IF NOT EXISTS messages_fts_ad AFTER DELETE ON messages BEGIN
+                INSERT INTO messages_fts(messages_fts, rowid, content)
+                    VALUES('delete', old.id, old.content);
+            END;
+        """)
 
         c.commit()
         logger.debug("数据库表初始化完成")
@@ -203,15 +217,12 @@ class Database:
                 (user_id, platform, role, content, display_content, tool_calls),
             )
             msg_id = cursor.lastrowid
-            # 同步更新 FTS5
-            self._conn.execute(
-                "INSERT INTO messages_fts(rowid, content) VALUES (?, ?)",
-                (msg_id, content),
-            )
+            # FTS5 由触发器自动同步，无需手动 INSERT
             self._conn.commit()
             return msg_id
 
-        return await asyncio.to_thread(_save)
+        async with self._write_lock:
+            return await asyncio.to_thread(_save)
 
     async def get_recent_messages(self, user_id: str, limit: int = 20) -> list[dict]:
         """获取最近 N 条消息（按时间正序）"""
@@ -276,7 +287,8 @@ class Database:
             )
             self._conn.commit()
 
-        await asyncio.to_thread(_mark)
+        async with self._write_lock:
+            await asyncio.to_thread(_mark)
 
     async def get_recent_active_users(self, limit: int = 10) -> list[dict]:
         """
@@ -352,7 +364,8 @@ class Database:
                 (summary, target_users, artifacts),
             )
             self._conn.commit()
-        await asyncio.to_thread(_save)
+        async with self._write_lock:
+            await asyncio.to_thread(_save)
 
     async def get_recent_consciousness_logs(self, n: int = 5) -> list[dict]:
         """获取最近 n 条意识日志"""
@@ -432,7 +445,8 @@ class Database:
             )
             self._conn.commit()
 
-        await asyncio.to_thread(_upsert)
+        async with self._write_lock:
+            await asyncio.to_thread(_upsert)
 
     async def get_recent_updated_topics(self, user_id: str, n: int = 1) -> list[dict]:
         """获取最近更新的 N 个话题（含完整摘要）"""
@@ -467,7 +481,8 @@ class Database:
             )
             self._conn.commit()
 
-        await asyncio.to_thread(_link)
+        async with self._write_lock:
+            await asyncio.to_thread(_link)
 
     async def get_messages_by_topic(self, topic_id: str, limit: int = 50) -> list[dict]:
         """获取话题下所有原始消息（时间正序）"""
@@ -529,7 +544,7 @@ class Database:
 
     # ==================== 话题向量操作 ====================
 
-    async def upsert_topic_vector(self, topic_id: str, embedding: list[float]) -> None:
+    async def upsert_topic_vector(self, topic_id: str, user_id: str, embedding: list[float]) -> None:
         """插入或更新话题向量"""
         def _upsert():
             # sqlite-vec 的 vec0 表不支持 ON CONFLICT，需要先删再插
@@ -540,27 +555,39 @@ class Database:
             except Exception:
                 pass
             self._conn.execute(
-                "INSERT INTO topic_vectors(topic_id, embedding) VALUES (?, ?)",
-                (topic_id, serialize_f32(embedding)),
+                "INSERT INTO topic_vectors(user_id, topic_id, embedding) VALUES (?, ?, ?)",
+                (user_id, topic_id, serialize_f32(embedding)),
             )
             self._conn.commit()
 
-        await asyncio.to_thread(_upsert)
+        async with self._write_lock:
+            await asyncio.to_thread(_upsert)
 
     async def search_topic_vectors(
-        self, query_embedding: list[float], top_k: int = 3
+        self, query_embedding: list[float], top_k: int = 3, user_id: str = ""
     ) -> list[tuple[str, float]]:
         """在话题向量中做 KNN 搜索，返回 [(topic_id, distance), ...]"""
         def _search():
             try:
-                return self._conn.execute(
-                    """SELECT topic_id, distance
-                       FROM topic_vectors
-                       WHERE embedding MATCH ?
-                       ORDER BY distance
-                       LIMIT ?""",
-                    (serialize_f32(query_embedding), top_k),
-                ).fetchall()
+                if user_id:
+                    # 使用 partition key 过滤，只搜索该用户的向量
+                    return self._conn.execute(
+                        """SELECT topic_id, distance
+                           FROM topic_vectors
+                           WHERE embedding MATCH ?
+                             AND k = ?
+                             AND user_id = ?""",
+                        (serialize_f32(query_embedding), top_k, user_id),
+                    ).fetchall()
+                else:
+                    return self._conn.execute(
+                        """SELECT topic_id, distance
+                           FROM topic_vectors
+                           WHERE embedding MATCH ?
+                           ORDER BY distance
+                           LIMIT ?""",
+                        (serialize_f32(query_embedding), top_k),
+                    ).fetchall()
             except Exception:
                 return []
 
@@ -578,7 +605,8 @@ class Database:
             )
             self._conn.commit()
             return cursor.lastrowid
-        return await asyncio.to_thread(_save)
+        async with self._write_lock:
+            return await asyncio.to_thread(_save)
 
     async def get_note_by_id(self, note_id: int) -> dict | None:
         """根据 ID 获取笔记完整内容"""
@@ -611,7 +639,8 @@ class Database:
             )
             self._conn.commit()
             return result.rowcount > 0
-        return await asyncio.to_thread(_append)
+        async with self._write_lock:
+            return await asyncio.to_thread(_append)
 
     async def delete_note(self, note_id: int) -> bool:
         """删除笔记，返回是否成功"""
@@ -619,7 +648,8 @@ class Database:
             result = self._conn.execute("DELETE FROM notebook WHERE id = ?", (note_id,))
             self._conn.commit()
             return result.rowcount > 0
-        return await asyncio.to_thread(_del)
+        async with self._write_lock:
+            return await asyncio.to_thread(_del)
 
     async def get_notes(self, tag: str | None = None, limit: int = 20) -> list[dict]:
         """获取笔记列表（兼容旧接口）"""
@@ -647,7 +677,8 @@ class Database:
             )
             self._conn.commit()
             return cursor.lastrowid
-        return await asyncio.to_thread(_save)
+        async with self._write_lock:
+            return await asyncio.to_thread(_save)
 
     async def get_skills(self, active_only: bool = True) -> list[dict]:
         def _get():
@@ -663,7 +694,8 @@ class Database:
             self._conn.execute("DELETE FROM skills WHERE name = ?", (name,))
             self._conn.commit()
             return self._conn.total_changes > 0
-        return await asyncio.to_thread(_del)
+        async with self._write_lock:
+            return await asyncio.to_thread(_del)
 
     # ==================== 任务操作 ====================
 
@@ -675,7 +707,8 @@ class Database:
             )
             self._conn.commit()
             return cursor.lastrowid
-        return await asyncio.to_thread(_save)
+        async with self._write_lock:
+            return await asyncio.to_thread(_save)
 
     async def get_tasks(self, status: str | None = None, limit: int = 20) -> list[dict]:
         def _get():
@@ -697,13 +730,15 @@ class Database:
             extra = ", completed_at = CURRENT_TIMESTAMP" if status == "done" else ""
             self._conn.execute(f"UPDATE tasks SET status = ?{extra} WHERE id = ?", (status, task_id))
             self._conn.commit()
-        await asyncio.to_thread(_update)
+        async with self._write_lock:
+            await asyncio.to_thread(_update)
 
     async def delete_task(self, task_id: int) -> None:
         def _del():
             self._conn.execute("DELETE FROM tasks WHERE id = ?", (task_id,))
             self._conn.commit()
-        await asyncio.to_thread(_del)
+        async with self._write_lock:
+            await asyncio.to_thread(_del)
 
     # ==================== 定时器操作 ====================
 
@@ -720,7 +755,8 @@ class Database:
             )
             self._conn.commit()
             return cursor.lastrowid
-        return await asyncio.to_thread(_save)
+        async with self._write_lock:
+            return await asyncio.to_thread(_save)
 
     async def get_active_timers(self) -> list[dict]:
         def _get():
@@ -742,13 +778,15 @@ class Database:
         def _update():
             self._conn.execute("UPDATE timers SET is_active = FALSE, last_triggered_at = CURRENT_TIMESTAMP WHERE id = ?", (timer_id,))
             self._conn.commit()
-        await asyncio.to_thread(_update)
+        async with self._write_lock:
+            await asyncio.to_thread(_update)
 
     async def delete_timer(self, timer_id: int) -> None:
         def _del():
             self._conn.execute("DELETE FROM timers WHERE id = ?", (timer_id,))
             self._conn.commit()
-        await asyncio.to_thread(_del)
+        async with self._write_lock:
+            await asyncio.to_thread(_del)
 
     # ==================== 管理面板 API ====================
 
@@ -762,7 +800,10 @@ class Database:
                 GROUP BY user_id, platform
                 ORDER BY last_active DESC
             """).fetchall()
-            return [dict(r) for r in rows]
+            return [
+                {"user_id": r[0], "platform": r[1], "msg_count": r[2], "last_active": r[3]}
+                for r in rows
+            ]
         return await asyncio.to_thread(_get)
 
     async def admin_get_messages(
@@ -778,7 +819,14 @@ class Database:
                 ORDER BY created_at DESC
                 LIMIT ? OFFSET ?
             """, (user_id, limit, offset)).fetchall()
-            return [dict(r) for r in rows]
+            return [
+                {
+                    "id": r[0], "user_id": r[1], "platform": r[2], "role": r[3],
+                    "content": r[4], "display_content": r[5], "tool_calls": r[6],
+                    "created_at": r[7], "is_archived": r[8],
+                }
+                for r in rows
+            ]
         return await asyncio.to_thread(_get)
 
     async def admin_get_stats(self) -> dict:
@@ -815,6 +863,12 @@ class Database:
                 FROM notebook
                 ORDER BY updated_at DESC
             """).fetchall()
-            return [dict(r) for r in rows]
+            return [
+                {
+                    "id": r[0], "owner_id": r[1], "title": r[2], "content": r[3],
+                    "tags": r[4], "created_at": r[5], "updated_at": r[6],
+                }
+                for r in rows
+            ]
         return await asyncio.to_thread(_get)
 

@@ -34,7 +34,10 @@ class MemoryTools:
         """在记忆话题中语义搜索，返回最相关的话题列表"""
         try:
             emb = await self.embed_client.embed(query)
-            results = await self.db.search_topic_vectors(emb, top_k=top_k)
+            # 使用 user_id 过滤，只搜索当前用户的话题
+            results = await self.db.search_topic_vectors(
+                emb, top_k=top_k, user_id=self._user_id
+            )
             if not results:
                 return "未找到相关话题记忆。"
 
@@ -73,6 +76,9 @@ class MemoryTools:
             topic = await self.db.get_topic_by_id(topic_id)
             if not topic:
                 return f"话题 {topic_id} 不存在。"
+            # 验证话题归属
+            if self._user_id and topic.get("user_id") != self._user_id:
+                return f"话题 {topic_id} 不存在。"
             return (
                 f"话题：{topic['title']}\n"
                 f"最后更新：{topic['updated_at']}\n"
@@ -87,6 +93,9 @@ class MemoryTools:
         try:
             topic = await self.db.get_topic_by_id(topic_id)
             if not topic:
+                return f"话题 {topic_id} 不存在。"
+            # 验证话题归属
+            if self._user_id and topic.get("user_id") != self._user_id:
                 return f"话题 {topic_id} 不存在。"
 
             messages = await self.db.get_messages_by_topic(topic_id, limit=limit)

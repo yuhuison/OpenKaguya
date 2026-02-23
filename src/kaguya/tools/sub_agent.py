@@ -37,6 +37,7 @@ SECONDARY_BLOCKED_TOOLS = {
 ALWAYS_BLOCKED_TOOLS = {
     "send_message_to_user",  # 子 Agent 不能直接给用户发消息
     "run_sub_agent",         # 防止递归
+    "use_toolkit",           # 防止子 Agent 激活工具组并泄漏到主 Agent
 }
 
 # 子 Agent 系统 Prompt

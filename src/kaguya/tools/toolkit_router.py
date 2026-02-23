@@ -80,45 +80,50 @@ class ToolkitRouter:
 
     def __init__(self, registry: ToolRegistry):
         self._registry = registry
-        self._active_toolkits: set[str] = set()
+        # per-conversation 激活状态：{history_key: {toolkit_names}}
+        self._active_toolkits: dict[str, set[str]] = {}
+        self._current_key: str = ""
         # toolkit 工具名 → toolkit 名的反查表
         self._tool_to_toolkit: dict[str, str] = {}
         for tk_name, tool_names in TOOLKIT_TOOL_NAMES.items():
             for tn in tool_names:
                 self._tool_to_toolkit[tn] = tk_name
 
+    def set_context(self, key: str) -> None:
+        """
+        设置当前上下文 key 并重置该 key 的激活状态。
+        应在每次 _process_message 开头调用。
+        """
+        self._current_key = key
+        self._active_toolkits[key] = set()
+
     def activate(self, toolkit_name: str) -> str:
         """
         激活一个 toolkit，返回使用指南。
-        
-        Returns:
-            使用指南文本
         """
         if toolkit_name not in TOOLKIT_GUIDES:
             available = ", ".join(TOOLKIT_GUIDES.keys())
             return f"❌ 未知工具组: {toolkit_name}。可用: {available}"
 
-        self._active_toolkits.add(toolkit_name)
-        logger.info(f"🔧 Toolkit 已激活: {toolkit_name}")
+        self._active_toolkits.setdefault(self._current_key, set()).add(toolkit_name)
+        logger.info(f"🔧 Toolkit 已激活: {toolkit_name} (context={self._current_key})")
         return TOOLKIT_GUIDES[toolkit_name]
 
     def is_active(self, toolkit_name: str) -> bool:
-        return toolkit_name in self._active_toolkits
+        return toolkit_name in self._active_toolkits.get(self._current_key, set())
 
     def get_visible_tools(self) -> list[dict]:
         """
         获取当前可见的工具定义（OpenAI schema 格式）。
-        
-        返回 core tools + 所有已激活 toolkit 的工具。
+        返回 core tools + 当前上下文中已激活 toolkit 的工具。
         """
+        active = self._active_toolkits.get(self._current_key, set())
         visible = []
         for name, tool in self._registry._tools.items():
             tk = self._tool_to_toolkit.get(name)
             if tk is None:
-                # 不属于任何 toolkit → 核心工具，始终可见
                 visible.append(tool.to_openai_schema())
-            elif tk in self._active_toolkits:
-                # 属于已激活的 toolkit
+            elif tk in active:
                 visible.append(tool.to_openai_schema())
         return visible
 
@@ -126,12 +131,12 @@ class ToolkitRouter:
         """检查工具是否当前可执行（核心工具或已激活 toolkit 的工具）"""
         tk = self._tool_to_toolkit.get(tool_name)
         if tk is None:
-            return True  # 核心工具
-        return tk in self._active_toolkits
+            return True
+        return tk in self._active_toolkits.get(self._current_key, set())
 
     @property
     def active_toolkit_names(self) -> list[str]:
-        return list(self._active_toolkits)
+        return list(self._active_toolkits.get(self._current_key, set()))
 
 
 class UseToolkitTool(Tool):

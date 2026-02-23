@@ -126,6 +126,7 @@ class TopicManager:
 
         # 处理每个 action
         all_processed_msg_ids: set[int] = set()
+        valid_ids = {m["id"] for m in unarchived}
 
         for action in actions:
             try:
@@ -133,7 +134,7 @@ class TopicManager:
                 topic_id = action.get("topic_id") or None
                 topic_title = action.get("topic_title", "未命名话题")
                 summary_delta = action.get("summary_delta", "")
-                msg_ids = [int(i) for i in action.get("message_ids", [])]
+                msg_ids = [int(i) for i in action.get("message_ids", []) if int(i) in valid_ids]
 
                 if not summary_delta:
                     continue
@@ -178,7 +179,7 @@ class TopicManager:
                 # 更新话题向量（对更新后的摘要做 embedding）
                 try:
                     embedding = await self.embed_client.embed(f"{title}：{new_summary[:1000]}")
-                    await self.db.upsert_topic_vector(topic_id, embedding)
+                    await self.db.upsert_topic_vector(topic_id, user_id, embedding)
                 except Exception as e:
                     logger.warning(f"话题向量更新失败 topic={topic_id}: {e}")
 
@@ -188,9 +189,10 @@ class TopicManager:
             except Exception as e:
                 logger.error(f"处理归档 action 失败: {e}, action={action}")
 
-        # 标记已归档（所有未归档消息，即使没被归入任何话题）
-        await self.db.mark_archived([m["id"] for m in unarchived])
-        logger.info(f"归档完成: {len(unarchived)}条消息已标记, {len(actions)}个话题已更新")
+        # 只标记被模型提及的消息为已归档，未提及的保留待下次处理
+        if all_processed_msg_ids:
+            await self.db.mark_archived(list(all_processed_msg_ids))
+        logger.info(f"归档完成: {len(all_processed_msg_ids)}/{len(unarchived)}条消息已标记, {len(actions)}个话题已更新")
 
     async def _compress_summary(self, summary: str) -> str:
         """当话题摘要超过5000字时，调用次级模型进行压缩"""

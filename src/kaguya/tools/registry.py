@@ -65,6 +65,12 @@ class ToolRegistry:
         self._tools[tool.name] = tool
         logger.debug(f"工具已注册: {tool.name}")
 
+    def unregister(self, name: str) -> None:
+        """注销一个工具"""
+        if name in self._tools:
+            del self._tools[name]
+            logger.debug(f"工具已注销: {name}")
+
     def register_all(self, tools: list[Tool]) -> None:
         """批量注册工具"""
         for tool in tools:
@@ -106,6 +112,9 @@ class ToolRegistry:
         for tool in self._tools.values():
             if hasattr(tool, "_current_user_id"):
                 tool._current_user_id = user_id
+            # 兼容 MemoryTools 等使用 _user_id 的工具
+            if hasattr(tool, "_user_id"):
+                tool._user_id = user_id
 
     @property
     def tool_names(self) -> list[str]:

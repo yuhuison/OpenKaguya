@@ -168,6 +168,17 @@ class RunTerminalTool(Tool):
         }
 
     async def execute(self, command: str, **_) -> str:
+        # 危险命令检测
+        _DANGEROUS_PATTERNS = [
+            "rm -rf /", "rm -rf ~", "mkfs", "dd if=",
+            ":(){ :|:& };:", "format c:", "del /f /s /q c:",
+            "shutdown", "reboot", "> /dev/sda",
+        ]
+        cmd_lower = command.lower().strip()
+        for pattern in _DANGEROUS_PATTERNS:
+            if pattern in cmd_lower:
+                return f"⚠️ 命令被阻止（包含危险操作 '{pattern}'）。如确需执行，请通知用户手动操作。"
+
         workspace_dir = self._workspace.get_user_workspace(self._current_user_id)
         try:
             result = await asyncio.to_thread(
