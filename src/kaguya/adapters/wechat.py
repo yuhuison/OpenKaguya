@@ -557,27 +557,14 @@ class WeChatAdapter(PlatformAdapter):
         if not self._session:
             return ""
 
-        from kaguya.adapters.wechat_tools import fetch_timeline, fetch_notifications
-
-        parts = []
+        from kaguya.adapters.wechat_tools import fetch_timeline
 
         try:
             timeline = await fetch_timeline(
                 self._session, self.config.base_url, self.config.api_key,
             )
-            if timeline:
-                parts.append(timeline)
+            return timeline or ""
         except Exception as e:
             logger.error(f"获取朋友圈首页失败: {e}")
-
-        try:
-            notifications = await fetch_notifications(
-                self._session, self.config.base_url, self.config.api_key,
-            )
-            if notifications:
-                parts.append(notifications)
-        except Exception as e:
-            logger.error(f"获取朋友圈通知失败: {e}")
-
-        return "\n\n".join(parts)
+            return ""
 

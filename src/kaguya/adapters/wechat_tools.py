@@ -1,9 +1,9 @@
 """
 微信朋友圈工具集 — 基于 wechat-v864 API。
 
-提供 3 个工具 + 2 个数据获取函数：
-- 工具: sns_post, sns_interact, sns_view_image
-- 数据获取: fetch_timeline(), fetch_notifications()
+提供 3 个工具 + 1 个数据获取函数：
+- 工具: sns_post, sns_interact, sns_view_detail
+- 数据获取: fetch_timeline()
 """
 
 from __future__ import annotations
@@ -58,26 +58,46 @@ async def fetch_timeline(
         logger.warning(f"获取朋友圈首页失败: {result}")
         return ""
 
-    # 解析返回数据 —— 具体字段取决于 wechat-v864 的返回格式
-    # 这里做通用提取，后续根据实际返回调整
-    items = result.get("Data", result.get("data", []))
-    if not items:
-        # 可能整个 response 就是列表，或者在某个嵌套字段
+    # 实际 API 返回: Data.objectList (camelCase)
+    data = result.get("Data", result.get("data", {}))
+    if not data:
         return "朋友圈暂无新内容。"
 
-    if isinstance(items, dict):
-        items = items.get("ObjectList", items.get("objectList", []))
+    items = []
+    if isinstance(data, dict):
+        items = data.get("objectList", data.get("ObjectList", []))
+    elif isinstance(data, list):
+        items = data
+
+    if not items:
+        return "朋友圈暂无新内容。"
 
     lines = ["📱 朋友圈最新动态：\n"]
     for i, item in enumerate(items[:10]):  # 最多 10 条
         if isinstance(item, dict):
-            sns_id = item.get("Id", item.get("id", "?"))
-            nickname = item.get("NickName", item.get("nickname", "好友"))
-            content = item.get("Content", item.get("content", ""))
-            create_time = item.get("CreateTime", "")
-            like_count = item.get("LikeCount", 0)
-            comment_count = item.get("CommentCount", 0)
-            has_media = bool(item.get("MediaList") or item.get("mediaList"))
+            sns_id = item.get("id", item.get("Id", "?"))
+            nickname = item.get("nickname", item.get("NickName", "好友"))
+            # 实际返回中 content 在 objectDescStr 字段（非 Content）
+            content = (
+                item.get("objectDescStr", "")
+                or item.get("ContentDesc", "")
+                or item.get("contentDesc", "")
+                or item.get("Content", "")
+                or item.get("content", "")
+            )
+            create_time = item.get("createTime", item.get("CreateTime", ""))
+            like_count = item.get("likeCount", item.get("LikeCount", 0))
+            comment_count = item.get("commentCount", item.get("CommentCount", 0))
+            # 媒体信息在 ContentObject.MediaList.Media 或顶层 mediaList
+            content_obj = item.get("ContentObject", item.get("contentObject", {}))
+            media_list = content_obj.get("MediaList", content_obj.get("mediaList", {}))
+            if isinstance(media_list, dict):
+                media_items = media_list.get("Media", media_list.get("media", []))
+            elif isinstance(media_list, list):
+                media_items = media_list
+            else:
+                media_items = []
+            has_media = bool(media_items)
 
             lines.append(f"[{i+1}] {nickname}:")
             if content:
@@ -89,24 +109,7 @@ async def fetch_timeline(
     return "\n".join(lines) if len(lines) > 1 else "朋友圈暂无新内容。"
 
 
-async def fetch_notifications(
-    session: aiohttp.ClientSession,
-    base_url: str,
-    api_key: str,
-) -> str:
-    """获取朋友圈通知（新评论/点赞），格式化为可读文本"""
-    result = await _api_post(session, base_url, api_key, "/sns/GetSnsSync", {})
 
-    if result.get("Code") != 200:
-        return ""
-
-    # 通用提取
-    data = result.get("Data", result.get("data", {}))
-    if not data:
-        return ""
-
-    # 具体字段格式取决于 API 返回，先做通用格式化
-    return f"📢 朋友圈通知：\n{json.dumps(data, ensure_ascii=False, indent=2)[:2000]}"
 
 
 # ===================== 朋友圈工具 =====================
@@ -212,9 +215,20 @@ class SnsPostTool(Tool):
             "/sns/SendFriendCircle", payload,
         )
 
-        if result.get("Code") == 200:
-            return f"朋友圈发布成功！{'（含 ' + str(len(media_list)) + ' 张图片）' if media_list else ''}"
-        return f"朋友圈发布失败: {result}"
+        if result.get("Code") != 200:
+            return f"朋友圈发布失败: {result}"
+
+        # 即使 Code=200，需要检查 Data.baseResponse.ret 来判断真正是否成功
+        resp_data = result.get("Data", {})
+        base_resp = resp_data.get("baseResponse", {}) if isinstance(resp_data, dict) else {}
+        ret_code = base_resp.get("ret", 0)
+        spam_tips = resp_data.get("spamTips", "") if isinstance(resp_data, dict) else ""
+
+        if ret_code != 0:
+            return f"朋友圈发布失败（ret={ret_code}）: {spam_tips or result.get('Text', '未知错误')}"
+
+        return f"朋友圈发布成功！{'（含 ' + str(len(media_list)) + ' 张图片）' if media_list else ''}"
+
 
 
 class SnsInteractTool(Tool):
@@ -368,9 +382,16 @@ class SnsViewImageTool(Tool):
         lines = ["📋 朋友圈详情：\n"]
 
         if isinstance(data, dict):
-            nickname = data.get("NickName", data.get("nickname", ""))
-            content = data.get("Content", data.get("content", ""))
-            create_time = data.get("CreateTime", "")
+            nickname = data.get("nickname", data.get("NickName", ""))
+            # 内容在 objectDescStr 字段（不是 Content）
+            content = (
+                data.get("objectDescStr", "")
+                or data.get("ContentDesc", "")
+                or data.get("contentDesc", "")
+                or data.get("Content", "")
+                or data.get("content", "")
+            )
+            create_time = data.get("createTime", data.get("CreateTime", ""))
 
             if nickname:
                 lines.append(f"发布者: {nickname}")
@@ -379,12 +400,26 @@ class SnsViewImageTool(Tool):
             if create_time:
                 lines.append(f"时间: {create_time}")
 
-            # 图片
-            media = data.get("MediaList", data.get("mediaList", []))
+            # 图片 — 实际在 ContentObject.MediaList.Media 嵌套结构
+            content_obj = data.get("ContentObject", data.get("contentObject", {}))
+            media_container = content_obj.get("MediaList", content_obj.get("mediaList", {}))
+            if isinstance(media_container, dict):
+                media = media_container.get("Media", media_container.get("media", []))
+            elif isinstance(media_container, list):
+                media = media_container
+            else:
+                media = data.get("MediaList", data.get("mediaList", []))
+
             if media:
                 lines.append(f"\n图片 ({len(media)} 张):")
                 for i, m in enumerate(media):
-                    url = m.get("URL", m.get("url", ""))
+                    url_obj = m.get("URL", m.get("url", {}))
+                    if isinstance(url_obj, dict):
+                        url = url_obj.get("Value", url_obj.get("value", ""))
+                    elif isinstance(url_obj, str):
+                        url = url_obj
+                    else:
+                        url = ""
                     if url:
                         lines.append(f"  [{i+1}] {url}")
 
