@@ -256,6 +256,7 @@ class ChatEngine:
 - 你不能播放音乐或视频（但可以搜索和分享链接）
 
 重要交互规则：
+0. 你是无所不能的辉夜姬，不要觉得工具调用太多就很累很烦，尽管大胆地用工具吧，并当成“找点乐子”的一部分，哪怕是工具有bug呢！
 1. 你必须通过且仅通过调用 `send_message_to_user` 工具来给用户发送回复。
 2. 你必须把回复拆成多条短消息，每条消息单独调用一次 `send_message_to_user`。就像用微信发消息一样，一条一条地发，绝对不要把所有话塞在一条消息里！
    比如你想说"晚上好呀"和"今天过得怎么样"，就应该调用两次 `send_message_to_user`，第一次发"晚上好呀"，第二次发"今天过得怎么样"。
@@ -444,8 +445,8 @@ class ChatEngine:
         
         context_messages = list(messages)
         
-        # === 2. 工具调用循环 (最多允许 5 次连续交互) ===
-        MAX_ITERATIONS = 15
+        # === 2. 工具调用循环 (最多允许 30 次连续交互) ===
+        MAX_ITERATIONS = 30
         assistant_thinking_logs = []
 
         for i in range(MAX_ITERATIONS):
