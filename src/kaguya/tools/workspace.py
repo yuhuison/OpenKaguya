@@ -129,6 +129,44 @@ class WorkspaceManager:
         logger.debug(f"图片已保存: {filepath}")
         return filename
 
+    def save_file(
+        self,
+        user_id: str,
+        filename: str,
+        data: str | bytes,
+    ) -> str:
+        """
+        将文件保存到 workspace/.files/ 目录。
+
+        Args:
+            user_id: 用户 ID
+            filename: 原始文件名（如 "report.pdf"）
+            data: base64 字符串或原始字节
+
+        Returns:
+            保存后的文件名（含 UUID 前缀避免冲突），如 "a1b2c3d4_report.pdf"
+        """
+        files_dir = self.get_user_workspace(user_id) / ".files"
+        files_dir.mkdir(exist_ok=True)
+
+        # 用短 UUID 前缀避免文件名冲突
+        safe_name = f"{uuid.uuid4().hex[:8]}_{filename}"
+        filepath = files_dir / safe_name
+
+        if isinstance(data, str):
+            raw = base64.b64decode(data)
+        else:
+            raw = data
+
+        filepath.write_bytes(raw)
+        logger.debug(f"文件已保存: {filepath} ({len(raw)} bytes)")
+        return safe_name
+
+    def get_file_path(self, user_id: str, filename: str) -> Path | None:
+        """根据文件名获取文件的完整路径，不存在则返回 None"""
+        filepath = self.get_user_workspace(user_id) / ".files" / filename
+        return filepath if filepath.exists() else None
+
     def get_image_path(self, user_id: str, filename: str) -> Path | None:
         """根据文件名获取图片的完整路径，不存在则返回 None"""
         filepath = self.get_user_workspace(user_id) / ".images" / filename

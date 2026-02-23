@@ -2,7 +2,7 @@
 微信适配器 — 基于 wechat-v864 代理服务。
 
 通过 WebSocket 接收微信消息，通过 HTTP API 发送消息。
-支持文本消息和图片消息，内置 3 秒消息聚合防抖。
+支持文本消息、图片消息和文件消息，内置 3 秒消息聚合防抖。
 """
 
 from __future__ import annotations
@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import re
 import uuid
 from dataclasses import dataclass, field
 from typing import Optional
@@ -37,6 +38,7 @@ class PendingBuffer:
 
     texts: list[str] = field(default_factory=list)
     images: list[str] = field(default_factory=list)  # base64 JPEG
+    files: list[dict] = field(default_factory=list)   # [{"filename": str, "data": str, "size": int}]
     timer: Optional[asyncio.Task] = field(default=None, repr=False)
 
     # 上下文（取自第一条消息）
@@ -47,11 +49,12 @@ class PendingBuffer:
     user_context: Optional[str] = None
 
     def is_empty(self) -> bool:
-        return not self.texts and not self.images
+        return not self.texts and not self.images and not self.files
 
     def reset(self) -> None:
         self.texts.clear()
         self.images.clear()
+        self.files.clear()
         self.timer = None
         self.message_id = ""
         self.sender = None
@@ -69,7 +72,7 @@ class WeChatAdapter(PlatformAdapter):
 
     特性:
     - 3 秒消息聚合防抖（等用户发完再处理）
-    - 支持文本 (msg_type=1) 和图片 (msg_type=3)
+    - 支持文本 (msg_type=1)、图片 (msg_type=3) 和文件 (msg_type=49)
     """
 
     def __init__(
@@ -173,8 +176,8 @@ class WeChatAdapter(PlatformAdapter):
         push_content = data.get("push_content", "")
         new_msg_id = str(data.get("new_msg_id", data.get("msg_id", "")))
 
-        # 支持文本消息(1) 和图片消息(3)
-        if msg_type not in (1, 3):
+        # 支持文本消息(1)、图片消息(3)、文件/引用消息(49)
+        if msg_type not in (1, 3, 49):
             logger.debug(f"跳过不支持的消息类型: type={msg_type} from={from_user}")
             return
 
@@ -218,9 +221,12 @@ class WeChatAdapter(PlatformAdapter):
         buffer_key = group_id if is_group else actual_sender
         platform_target = group_id if is_group else actual_sender
 
-        # 提取图片 base64（msg_type=3）
+        # === 按消息类型分流处理 ===
         image_b64: Optional[str] = None
+        file_info: Optional[dict] = None
+
         if msg_type == 3:
+            # 图片消息
             image_b64 = self._extract_image_base64(data)
             if not image_b64:
                 logger.warning("收到图片消息但无法提取图片数据")
@@ -229,7 +235,18 @@ class WeChatAdapter(PlatformAdapter):
                 f"📩 微信{'群' if is_group else '私聊'}图片: "
                 f"{nickname}({unified_id}): [图片 {len(image_b64) // 1024}KB]"
             )
-        else:
+        elif msg_type == 49:
+            # 复合消息（文件 / 引用 / 链接等）
+            file_info = await self._handle_file_message(actual_content, data)
+            if not file_info:
+                # 不是文件类型，或下载失败，跳过
+                return
+            logger.info(
+                f"📩 微信{'群' if is_group else '私聊'}文件: "
+                f"{nickname}({unified_id}): [{file_info['filename']} "
+                f"{file_info['size'] // 1024}KB]"
+            )
+        elif msg_type == 1:
             if not actual_content:
                 return
             logger.info(
@@ -255,6 +272,8 @@ class WeChatAdapter(PlatformAdapter):
             buf.texts.append(actual_content)
         elif msg_type == 3 and image_b64:
             buf.images.append(image_b64)
+        elif msg_type == 49 and file_info:
+            buf.files.append(file_info)
 
         # 更新上下文（取第一条消息的信息，或持续更新）
         if not buf.sender:
@@ -264,9 +283,9 @@ class WeChatAdapter(PlatformAdapter):
             buf.platform_target = platform_target
             buf.user_context = user_context
 
-        # 只有文本消息才启动/重置防抖定时器
+        # 文本和文件消息启动/重置防抖定时器
         # 图片消息只是静默加入缓冲区，等待后续文本消息触发处理
-        if msg_type == 1:
+        if msg_type in (1, 49):
             if buf.timer and not buf.timer.done():
                 buf.timer.cancel()
             buf.timer = asyncio.create_task(self._flush_after_delay(buffer_key))
@@ -321,12 +340,41 @@ class WeChatAdapter(PlatformAdapter):
                     data=img_b64, filename=f"wechat_image_{i}.jpg",
                 ))
 
-        # 如果只有图片没有文字，用占位符作为内容（以便后续历史中能展开）
+        # 构建文件附件
+        file_placeholders: list[str] = []
+        for f_info in buf.files:
+            if self._workspace and buf.sender:
+                try:
+                    saved_name = self._workspace.save_file(
+                        user_id=buf.sender.user_id,
+                        filename=f_info["filename"],
+                        data=f_info["data"],
+                    )
+                    placeholder = f"[workspace_file:{buf.sender.user_id}:{saved_name}]"
+                    file_placeholders.append(placeholder)
+                    attachments.append(Attachment(
+                        type="file",
+                        filename=saved_name,
+                        metadata={
+                            "original_filename": f_info["filename"],
+                            "workspace_ref": saved_name,
+                            "user_id": buf.sender.user_id,
+                            "size": f_info["size"],
+                        },
+                    ))
+                except Exception as e:
+                    logger.error(f"文件保存失败: {e}")
+                    file_placeholders.append(f"[用户发送了文件: {f_info['filename']}]")
+            else:
+                file_placeholders.append(f"[用户发送了文件: {f_info['filename']}]")
+
+        # 如果只有附件没有文字，用占位符作为内容
         if not merged_content:
-            if image_placeholders:
-                merged_content = " ".join(image_placeholders)
+            all_placeholders = image_placeholders + file_placeholders
+            if all_placeholders:
+                merged_content = " ".join(all_placeholders)
             elif attachments:
-                merged_content = "[用户发送了图片]"
+                merged_content = "[用户发送了附件]"
 
 
         message = UnifiedMessage(
@@ -343,7 +391,8 @@ class WeChatAdapter(PlatformAdapter):
             message._user_context = buf.user_context
 
         logger.info(
-            f"📦 消息聚合完毕: {len(buf.texts)}条文字 + {len(buf.images)}张图片 → 提交处理"
+            f"📦 消息聚合完毕: {len(buf.texts)}条文字 + {len(buf.images)}张图片 "
+            f"+ {len(buf.files)}个文件 → 提交处理"
         )
 
         # 调用处理器
@@ -352,7 +401,12 @@ class WeChatAdapter(PlatformAdapter):
                 target = buf.platform_target
                 send_count = 0
 
-                async def _send_now(text: str, image_path: str | None = None):
+                async def _send_now(
+                    text: str,
+                    image_path: str | None = None,
+                    file_path: str | None = None,
+                    **_,
+                ):
                     nonlocal send_count
                     if send_count > 0:
                         import random
@@ -364,12 +418,14 @@ class WeChatAdapter(PlatformAdapter):
                         await self._send_single(target, text)
                     if image_path:
                         await self._send_image(target, image_path)
+                    if file_path:
+                        await self._send_file(target, file_path)
 
                 await self._handler(message, send_callback=_send_now)
             except Exception as e:
                 logger.error(f"消息处理失败: {e}")
 
-    # ==================== 图片提取 ====================
+    # ==================== 图片 & 文件提取 ====================
 
     @staticmethod
     def _extract_image_base64(data: dict) -> Optional[str]:
@@ -391,6 +447,72 @@ class WeChatAdapter(PlatformAdapter):
             return None
 
         return buffer
+
+    async def _handle_file_message(self, xml_content: str, data: dict) -> Optional[dict]:
+        """
+        处理 MsgType=49 的复合消息。
+        仅提取文件消息（<type>6</type>），其他子类型跳过。
+
+        Returns:
+            {"filename": str, "data": str(base64), "size": int} 或 None
+        """
+        # 检查是否为文件类型（<type>6</type>）
+        type_match = re.search(r'<type>(\d+)</type>', xml_content)
+        if not type_match or type_match.group(1) != '6':
+            return None
+
+        # 提取文件信息
+        title_match = re.search(r'<title>(.+?)</title>', xml_content)
+        totallen_match = re.search(r'<totallen>(\d+)</totallen>', xml_content)
+        aeskey_match = re.search(r'<cdnattachfileaeskey>(.+?)</cdnattachfileaeskey>', xml_content)
+        # 尝试多个可能的 URL tag
+        cdnurl_match = (
+            re.search(r'<cdnattachurl>(.+?)</cdnattachurl>', xml_content)
+            or re.search(r'<fileuploadtoken>(.+?)</fileuploadtoken>', xml_content)
+        )
+
+        filename = title_match.group(1) if title_match else "unknown_file"
+        file_size = int(totallen_match.group(1)) if totallen_match else 0
+        aeskey = aeskey_match.group(1) if aeskey_match else None
+        cdnurl = cdnurl_match.group(1) if cdnurl_match else None
+
+        if not aeskey or not cdnurl:
+            logger.warning(f"文件消息缺少 aeskey 或 cdnurl: {filename}")
+            return None
+
+        # 通过 CDN 下载文件
+        try:
+            file_b64 = await self._download_cdn_file(aeskey, cdnurl)
+            if not file_b64:
+                logger.warning(f"文件下载失败: {filename}")
+                return None
+            return {"filename": filename, "data": file_b64, "size": file_size}
+        except Exception as e:
+            logger.error(f"文件下载异常: {filename} — {e}")
+            return None
+
+    async def _download_cdn_file(self, aeskey: str, file_url: str) -> Optional[str]:
+        """通过 SendCdnDownload API 下载文件，返回 base64 数据"""
+        url = f"{self.config.base_url}/message/SendCdnDownload?key={self.config.api_key}"
+        payload = {
+            "AesKey": aeskey,
+            "FileURL": file_url,
+            "FileType": 1,
+        }
+        try:
+            async with self._session.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=60)) as resp:
+                result = await resp.json()
+                if result.get("Code") != 200:
+                    logger.warning(f"CDN 下载失败: {result}")
+                    return None
+                # 返回的 base64 数据在 Data.buffer 字段
+                data = result.get("Data", {})
+                if isinstance(data, dict):
+                    return data.get("buffer") or data.get("Buffer")
+                return None
+        except Exception as e:
+            logger.error(f"CDN 下载异常: {e}")
+            return None
 
     # ==================== 发送消息 ====================
 
@@ -448,6 +570,74 @@ class WeChatAdapter(PlatformAdapter):
                     logger.debug(f"📤 微信图片已发送到 {target}: {path.name}")
         except Exception as e:
             logger.error(f"发送图片异常: {e}")
+
+    async def _send_file(self, target: str, file_path: str) -> None:
+        """发送文件消息（读取本地文件 → 上传 → 发送 App 消息）"""
+        from pathlib import Path
+        path = Path(file_path)
+        if not path.exists():
+            logger.warning(f"文件不存在: {file_path}")
+            return
+
+        try:
+            file_data = path.read_bytes()
+            file_b64 = base64.b64encode(file_data).decode("ascii")
+        except Exception as e:
+            logger.error(f"读取文件失败: {e}")
+            return
+
+        # Step 1: 上传文件附件
+        upload_url = f"{self.config.base_url}/other/UploadAppAttachApi?key={self.config.api_key}"
+        upload_payload = {"FileData": file_b64}
+        try:
+            async with self._session.post(upload_url, json=upload_payload, timeout=aiohttp.ClientTimeout(total=120)) as resp:
+                upload_result = await resp.json()
+                if upload_result.get("Code") != 200:
+                    logger.warning(f"文件上传失败: {upload_result}")
+                    return
+                attach_id = upload_result.get("Data", {}).get("AttachId", "")
+                if not attach_id:
+                    logger.warning(f"上传成功但未返回 AttachId: {upload_result}")
+                    return
+        except Exception as e:
+            logger.error(f"文件上传异常: {e}")
+            return
+
+        # Step 2: 发送 App 消息（文件类型）
+        file_size = len(file_data)
+        filename = path.name
+        file_ext = path.suffix.lstrip('.')
+
+        content_xml = (
+            f'<appmsg appid="" sdkver="0">'
+            f'<title>{filename}</title>'
+            f'<des></des>'
+            f'<type>6</type>'
+            f'<appattach>'
+            f'<totallen>{file_size}</totallen>'
+            f'<attachid>{attach_id}</attachid>'
+            f'<fileext>{file_ext}</fileext>'
+            f'</appattach>'
+            f'</appmsg>'
+        )
+
+        send_url = f"{self.config.base_url}/message/SendAppMessage?key={self.config.api_key}"
+        send_payload = {
+            "AppList": [{
+                "ToUserName": target,
+                "ContentXML": content_xml,
+                "ContentType": 6,
+            }]
+        }
+        try:
+            async with self._session.post(send_url, json=send_payload) as resp:
+                result = await resp.json()
+                if result.get("Code") != 200:
+                    logger.warning(f"发送文件失败: {result}")
+                else:
+                    logger.debug(f"📤 微信文件已发送到 {target}: {filename}")
+        except Exception as e:
+            logger.error(f"发送文件异常: {e}")
 
     async def send_messages(
         self,

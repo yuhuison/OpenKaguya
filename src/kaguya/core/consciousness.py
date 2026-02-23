@@ -163,18 +163,21 @@ class ConsciousnessScheduler:
 
                 async def _tracking_callback(
                     text: str, image_path: str | None = None,
-                    target_user_id: str | None = None, **_
+                    target_user_id: str | None = None,
+                    file_path: str | None = None, **_
                 ):
                     """包装发送回调：记录发出的消息及其目标用户"""
-                    if text or image_path:
+                    if text or image_path or file_path:
                         sent_messages.append({
                             "text": text or "",
                             "image_path": image_path,
+                            "file_path": file_path,
                             "target_user_id": target_user_id or "",
                         })
                     if self._raw_send_callback:
                         await self._raw_send_callback(
                             text, image_path=image_path,
+                            file_path=file_path,
                             target_user_id=target_user_id,
                         )
 
@@ -403,17 +406,20 @@ class ConsciousnessScheduler:
 
                 async def _tracking_callback(
                     text: str, image_path: str | None = None,
-                    target_user_id: str | None = None, **_
+                    target_user_id: str | None = None,
+                    file_path: str | None = None, **_
                 ):
-                    if text or image_path:
+                    if text or image_path or file_path:
                         sent_messages.append({
                             "text": text or "",
                             "image_path": image_path,
+                            "file_path": file_path,
                             "target_user_id": target_user_id or "",
                         })
                     if self._raw_send_callback:
                         await self._raw_send_callback(
                             text, image_path=image_path,
+                            file_path=file_path,
                             target_user_id=target_user_id,
                         )
 

@@ -241,8 +241,8 @@ class ChatEngine:
 - 记忆系统：你能搜索历史对话记忆、写笔记、管理任务
 - 网络搜索：你能用 web_search 搜索互联网，用 web_read 阅读网页内容
 - 子 Agent：你可以用 run_sub_agent 启动子 Agent 完成独立任务。选 'secondary' 用次级模型（快、上下文大），选 'primary' 用主模型（适合复杂任务）
-- 接收图片：用户可以发图片给你，你能看到图片内容并理解
-- 发送图片：send_message_to_user 支持 image_path 参数，你可以附带本地图片文件路径来给用户发送图片
+- 接收图片/文件：用户可以发图片、文件给你，你能看到且理解内容
+- 发送图片/文件：send_message_to_user 支持 image_path 和 file_path 参数，可以附带本地文件或图片路径发送给用户
 
 扩展能力（需要先用 use_toolkit 激活对应工具组）：
 - use_toolkit("workspace")：文件读写、列目录、执行终端命令（如运行 Python 脚本、用 matplotlib 画图等）
@@ -279,7 +279,7 @@ class ChatEngine:
         "type": "function",
         "function": {
             "name": "send_message_to_user",
-            "description": "向用户发送一条短消息（一两句话）。想说多句话时，必须拆开多次调用此工具，每次只发一小段。可以附带一张图片（比如浏览器截图）。",
+            "description": "向用户发送一条短消息（一两句话）。想说多句话时，必须拆开多次调用此工具，每次只发一小段。可以附带图片或文件。",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -290,6 +290,10 @@ class ChatEngine:
                     "image_path": {
                         "type": "string",
                         "description": "可选，要附带发送的图片文件路径（如浏览器截图路径）",
+                    },
+                    "file_path": {
+                        "type": "string",
+                        "description": "可选，要附带发送的文件路径（如 workspace 中的文件）",
                     },
                     "target_user_id": {
                         "type": "string",
@@ -495,6 +499,7 @@ class ChatEngine:
                     if tc_name == "send_message_to_user":
                         content = tc_args.get("content", "")
                         image_path = tc_args.get("image_path")
+                        file_path = tc_args.get("file_path")
                         target_uid = tc_args.get("target_user_id")
                         # 图片压缩（超过 1MB 时自动压缩）
                         if image_path:
@@ -503,6 +508,8 @@ class ChatEngine:
                         cb_kwargs = {}
                         if image_path:
                             cb_kwargs["image_path"] = image_path
+                        if file_path:
+                            cb_kwargs["file_path"] = file_path
                         if target_uid:
                             cb_kwargs["target_user_id"] = target_uid
                         if content:
@@ -512,11 +519,11 @@ class ChatEngine:
                                     await send_callback(content, **cb_kwargs)
                                 except Exception as e:
                                     logger.error(f"即时发送失败: {e}")
-                        elif image_path and send_callback:
+                        elif (image_path or file_path) and send_callback:
                             try:
                                 await send_callback("", **cb_kwargs)
                             except Exception as e:
-                                logger.error(f"即时发送图片失败: {e}")
+                                logger.error(f"即时发送附件失败: {e}")
                         tool_result_content = "Message sent to user successfully."
                     else:
                         # 模糊匹配工具名（兜底拼写错误，如 send_message_to_uesr）
@@ -531,12 +538,15 @@ class ChatEngine:
                         if tc_name == "send_message_to_user":
                             content = tc_args.get("content", "")
                             image_path = tc_args.get("image_path")
+                            file_path = tc_args.get("file_path")
                             target_uid = tc_args.get("target_user_id")
                             if image_path:
                                 image_path = self._compress_image_if_needed(image_path)
                             cb_kwargs = {}
                             if image_path:
                                 cb_kwargs["image_path"] = image_path
+                            if file_path:
+                                cb_kwargs["file_path"] = file_path
                             if target_uid:
                                 cb_kwargs["target_user_id"] = target_uid
                             if content:
@@ -546,11 +556,11 @@ class ChatEngine:
                                         await send_callback(content, **cb_kwargs)
                                     except Exception as e:
                                         logger.error(f"即时发送失败（修正后）: {e}")
-                            elif image_path and send_callback:
+                            elif (image_path or file_path) and send_callback:
                                 try:
                                     await send_callback("", **cb_kwargs)
                                 except Exception as e:
-                                    logger.error(f"即时发送图片失败（修正后）: {e}")
+                                    logger.error(f"即时发送附件失败（修正后）: {e}")
                             tool_result_content = "Message sent to user successfully."
                         else:
                             # 通过 ToolRegistry 分发执行
