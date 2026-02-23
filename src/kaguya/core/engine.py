@@ -565,11 +565,31 @@ class ChatEngine:
                     logger.debug(f"🔧 工具结果: {tc_name} → {str(tool_result_content)[:500]}")
                     
                     # 将工具执行结果记录到上下文
-                    context_messages.append({
-                        "role": "tool",
-                        "tool_call_id": tc_id,
-                        "content": tool_result_content
-                    })
+                    # 支持多模态结果（如截图工具返回图片数据）
+                    if isinstance(tool_result_content, dict) and tool_result_content.get("_multimodal"):
+                        # 构建 vision 格式的 tool 消息：文本 + 图片
+                        content_parts = [
+                            {"type": "text", "text": tool_result_content.get("text", "")},
+                        ]
+                        if tool_result_content.get("image_base64"):
+                            mime = tool_result_content.get("mime_type", "image/png")
+                            b64 = tool_result_content["image_base64"]
+                            content_parts.append({
+                                "type": "image_url",
+                                "image_url": {"url": f"data:{mime};base64,{b64}"},
+                            })
+                        context_messages.append({
+                            "role": "tool",
+                            "tool_call_id": tc_id,
+                            "content": content_parts,
+                        })
+                    else:
+                        tool_result_str = tool_result_content if isinstance(tool_result_content, str) else str(tool_result_content)
+                        context_messages.append({
+                            "role": "tool",
+                            "tool_call_id": tc_id,
+                            "content": tool_result_str,
+                        })
 
                 # 如果这一轮全是发消息的调用，不需要再请求 LLM，直接结束
                 if not has_non_send_tool:

@@ -344,7 +344,7 @@ class BrowserScreenshotTool(Tool):
     def parameters(self):
         return {"type": "object", "properties": {}}
 
-    async def execute(self, **_) -> str:
+    async def execute(self, **_) -> str | dict:
         try:
             page = await self._tk._get_current_page()
 
@@ -360,13 +360,24 @@ class BrowserScreenshotTool(Tool):
             filename = f"screenshot_{int(time.time())}.png"
             filepath = self._tk.screenshot_dir / filename
             screenshot_data = await page.screenshot(format="png")
+
+            import base64 as _b64
             if isinstance(screenshot_data, bytes):
                 filepath.write_bytes(screenshot_data)
+                b64_str = _b64.b64encode(screenshot_data).decode()
             else:
-                # base64 编码
-                import base64
-                filepath.write_bytes(base64.b64decode(screenshot_data))
-            return f"截图已保存: {filepath}"
+                # screenshot_data 已经是 base64 字符串
+                filepath.write_bytes(_b64.b64decode(screenshot_data))
+                b64_str = screenshot_data
+
+            # 返回多模态结果：文本 + 图片数据
+            # engine 会检测 _multimodal 标志并构建 vision 格式的 tool 消息
+            return {
+                "_multimodal": True,
+                "text": f"截图已保存: {filepath}",
+                "image_base64": b64_str,
+                "mime_type": "image/png",
+            }
         except Exception as e:
             return f"截图失败: {e}"
 

@@ -472,18 +472,23 @@ class ManageNotesTool(Tool):
 # ========================= 定时器工具 =========================
 
 
-class SetTimerTool(Tool):
-    """设置定时器/闹钟"""
+class ScheduleTaskTool(Tool):
+    """计划一次未来的唤醒任务"""
 
     def __init__(self, db: Database):
         self._db = db
+        self._current_user_id: str = ""
 
     @property
-    def name(self): return "set_timer"
+    def name(self): return "schedule_task"
 
     @property
     def description(self):
-        return "设置定时器或闹钟。可以创建一次性提醒或查看已有定时器。"
+        return (
+            "计划一次未来的唤醒任务。到指定时间后，你会被自动唤醒并执行该任务。"
+            "用途举例：用户说'两小时后提醒我开会'，你就计划一次两小时后的唤醒，到时候你会自动醒来提醒他。"
+            "必须包含明确的任务描述和触发时间。"
+        )
 
     @property
     def parameters(self):
@@ -493,35 +498,49 @@ class SetTimerTool(Tool):
                 "action": {
                     "type": "string",
                     "enum": ["add", "list", "delete"],
-                    "description": "操作类型",
+                    "description": "操作类型：add=计划新任务, list=查看待执行任务, delete=取消任务",
                 },
-                "name": {"type": "string", "description": "定时器名称（add 时必填）"},
-                "action_desc": {"type": "string", "description": "到期时要做的事情（add 时必填）"},
-                "trigger_at": {"type": "string", "description": "触发时间，格式 YYYY-MM-DD HH:MM"},
-                "timer_id": {"type": "integer", "description": "定时器 ID（delete 时必填）"},
+                "name": {"type": "string", "description": "任务名称，简短描述（add 时必填）"},
+                "task_description": {
+                    "type": "string",
+                    "description": (
+                        "任务的完整描述，包含所有必要上下文（add 时必填）。"
+                        "例如：'提醒用户 micks 去开会，他说下午3点有个重要的产品评审会议'"
+                    ),
+                },
+                "trigger_at": {
+                    "type": "string",
+                    "description": "唤醒时间，格式 YYYY-MM-DD HH:MM。根据当前时间计算。",
+                },
+                "timer_id": {"type": "integer", "description": "任务 ID（delete 时必填）"},
             },
             "required": ["action"],
         }
 
     async def execute(self, action: str, **kwargs) -> str:
         if action == "add":
-            name = kwargs.get("name", "未命名提醒")
-            action_desc = kwargs.get("action_desc", "")
+            name = kwargs.get("name", "未命名任务")
+            task_desc = kwargs.get("task_description", kwargs.get("action_desc", ""))
             trigger_at = kwargs.get("trigger_at")
-            if not action_desc:
-                return "需要 action_desc 参数（到期要做什么）。"
-            timer_id = await self._db.save_timer(name, action_desc, trigger_at=trigger_at)
-            return f"定时器已设置 (ID: {timer_id}): {name} @ {trigger_at or '无具体时间'}"
+            if not task_desc:
+                return "需要 task_description 参数（到时候要做什么）。"
+            if not trigger_at:
+                return "需要 trigger_at 参数（什么时候执行）。"
+            # 自动附加请求用户上下文
+            user_id = self._current_user_id or "unknown"
+            full_desc = f"[请求用户: {user_id}] {task_desc}"
+            timer_id = await self._db.save_timer(name, full_desc, trigger_at=trigger_at)
+            return f"✅ 任务已计划 (ID: {timer_id}): {name}\n触发时间: {trigger_at}\n到时候我会自动醒来执行！"
 
         elif action == "list":
             timers = await self._db.get_active_timers()
             if not timers:
-                return "没有活跃的定时器。"
-            lines = ["⏰ 定时器列表:"]
+                return "没有待执行的计划任务。"
+            lines = ["📋 计划任务列表:"]
             for t in timers:
                 lines.append(f"  [{t['id']}] {t['name']}: {t['action']}")
                 if t["trigger_at"]:
-                    lines.append(f"      触发时间: {t['trigger_at']}")
+                    lines.append(f"      执行时间: {t['trigger_at']}")
             return "\n".join(lines)
 
         elif action == "delete":
@@ -529,7 +548,7 @@ class SetTimerTool(Tool):
             if not timer_id:
                 return "需要 timer_id 参数。"
             await self._db.delete_timer(timer_id)
-            return f"定时器 {timer_id} 已删除"
+            return f"任务 {timer_id} 已取消"
 
         return f"未知操作: {action}"
 
@@ -555,6 +574,6 @@ def create_builtin_tools(
         QueryMessagesTool(db),
         # 笔记本（统一工具）
         ManageNotesTool(db),
-        # 定时器
-        SetTimerTool(db),
+        # 计划任务
+        ScheduleTaskTool(db),
     ]

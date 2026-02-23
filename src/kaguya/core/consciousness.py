@@ -53,6 +53,7 @@ class ConsciousnessScheduler:
         self._lock = asyncio.Lock()
         self._running = False
         self._task: asyncio.Task | None = None
+        self._timer_task: asyncio.Task | None = None
 
         consciousness = config.consciousness
         self.enabled = consciousness.enabled
@@ -87,16 +88,18 @@ class ConsciousnessScheduler:
             return
         self._running = True
         self._task = asyncio.create_task(self._heartbeat_loop())
-        logger.info("🧠 主动意识系统已启动")
+        self._timer_task = asyncio.create_task(self._timer_check_loop())
+        logger.info("🧠 主动意识系统已启动（含计划任务轮询）")
 
     async def stop(self) -> None:
         self._running = False
-        if self._task:
-            self._task.cancel()
-            try:
-                await self._task
-            except asyncio.CancelledError:
-                pass
+        for t in (self._task, self._timer_task):
+            if t:
+                t.cancel()
+                try:
+                    await t
+                except asyncio.CancelledError:
+                    pass
         logger.info("🧠 主动意识系统已停止")
 
     async def _heartbeat_loop(self) -> None:
@@ -114,6 +117,22 @@ class ConsciousnessScheduler:
                 continue
 
             await self._wake_up()
+
+    async def _timer_check_loop(self) -> None:
+        """高频轮询计划任务（每 60 秒检查一次）"""
+        while self._running:
+            await asyncio.sleep(60)
+            if not self._running or not self.db:
+                continue
+            try:
+                triggered = await self.db.get_triggered_timers()
+                for timer in triggered:
+                    logger.info(f"⏰ 计划任务到期: [{timer['name']}] {timer['action']}")
+                    await self.db.deactivate_timer(timer["id"])
+                    # 触发专属任务唤醒
+                    await self._execute_task_wake(timer)
+            except Exception as e:
+                logger.error(f"计划任务检查出错: {e}")
 
     # ─── 核心唤醒流程 ───
 
@@ -176,8 +195,7 @@ class ConsciousnessScheduler:
                     send_callback=_tracking_callback,
                 )
 
-                # 4. 处理到期定时器
-                await self._handle_triggered_timers()
+                # 4. 定时器已由 _timer_check_loop 独立处理，此处不再重复
 
                 # 5. 后处理：同步消息 + 生成行动日志
                 await self._post_process(sent_messages, replies)
@@ -324,7 +342,10 @@ class ConsciousnessScheduler:
                 ],
                 model_tier="secondary",
             )
-            return summary.strip()
+            # secondary_llm.chat() 可能返回 dict 或 str
+            if isinstance(summary, dict):
+                summary = summary.get("content", "") or str(summary)
+            return summary.strip() if isinstance(summary, str) else str(summary)
         except Exception as e:
             logger.warning(f"行动日志总结失败: {e}")
             # 降级到简单摘要
@@ -332,18 +353,111 @@ class ConsciousnessScheduler:
                 return f"向用户发送了 {len(sent_messages)} 条消息"
             return "执行了一些行动（总结失败）"
 
-    # ─── 定时器 ───
+    # ─── 计划任务唤醒 ───
 
-    async def _handle_triggered_timers(self) -> None:
-        if not self.db:
-            return
-        try:
-            triggered = await self.db.get_triggered_timers()
-            for timer in triggered:
-                logger.info(f"⏰ 定时器到期: [{timer['name']}] {timer['action']}")
-                await self.db.deactivate_timer(timer["id"])
-        except Exception as e:
-            logger.error(f"处理定时器出错: {e}")
+    async def _execute_task_wake(self, timer: dict) -> None:
+        """
+        计划任务触发的专属唤醒。
+        使用任务专注的 prompt，确保 AI 优先处理预定任务。
+        """
+        async with self._lock:
+            try:
+                logger.info(f"🎯 执行计划任务唤醒: {timer['name']}")
+
+                # 注册意识阶段工具
+                for adapter in self._adapters:
+                    tools = adapter.get_tools(phase="consciousness")
+                    if tools:
+                        self.chat_engine.tool_registry.register_all(tools)
+                for prov in self._providers:
+                    tools = prov.get_tools(phase="consciousness")
+                    if tools:
+                        self.chat_engine.tool_registry.register_all(tools)
+
+                now = datetime.now()
+                time_str = now.strftime("%Y年%m月%d日 %H:%M")
+
+                task_prompt = f"""
+[OpenKaguya]
+[系统唤醒 — 计划任务执行模式]
+
+当前时间: {time_str}
+
+━━ 你有一个预定任务需要立刻执行！ ━━
+
+📌 任务名称: {timer['name']}
+📋 任务内容: {timer['action']}
+⏰ 计划时间: {timer.get('trigger_at', '未知')}
+
+这是你之前主动计划的任务，现在时间到了，请立刻执行！
+
+执行要求：
+1. 仔细阅读任务内容，理解需要做什么
+2. 如果任务涉及给某个用户发消息（如提醒），用 send_message_to_user 立刻发送
+3. 任务完成后，如果你觉得还有时间，可以顺便做点别的有趣的事
+4. 先在 content 中简要说明你要如何执行这个任务，然后立刻行动
+"""
+
+                # 追踪消息
+                sent_messages: list[dict] = []
+
+                async def _tracking_callback(
+                    text: str, image_path: str | None = None,
+                    target_user_id: str | None = None, **_
+                ):
+                    if text or image_path:
+                        sent_messages.append({
+                            "text": text or "",
+                            "image_path": image_path,
+                            "target_user_id": target_user_id or "",
+                        })
+                    if self._raw_send_callback:
+                        await self._raw_send_callback(
+                            text, image_path=image_path,
+                            target_user_id=target_user_id,
+                        )
+
+                wake_message = UnifiedMessage(
+                    message_id=str(uuid.uuid4()),
+                    platform=Platform.SYSTEM,
+                    sender=UserInfo(
+                        user_id="kaguya",
+                        nickname="辉夜姬（计划任务）",
+                        platform=Platform.SYSTEM,
+                    ),
+                    content=task_prompt,
+                )
+
+                replies = await self.chat_engine.handle_message(
+                    wake_message,
+                    send_callback=_tracking_callback,
+                )
+
+                # 后处理
+                await self._post_process(sent_messages, replies)
+
+                if sent_messages:
+                    logger.info(f"🎯 计划任务完成: {timer['name']}，发了 {len(sent_messages)} 条消息")
+                else:
+                    logger.info(f"🎯 计划任务完成: {timer['name']}（未发送消息）")
+
+            except Exception as e:
+                logger.error(f"计划任务执行出错: {timer['name']} — {e}")
+
+            finally:
+                for adapter in self._adapters:
+                    try:
+                        for tool in adapter.get_tools(phase="consciousness"):
+                            self.chat_engine.tool_registry.unregister(tool.name)
+                    except Exception:
+                        pass
+                for prov in self._providers:
+                    try:
+                        for tool in prov.get_tools(phase="consciousness"):
+                            self.chat_engine.tool_registry.unregister(tool.name)
+                    except Exception:
+                        pass
+
 
     # ─── 构建唤醒 Prompt ───
 
@@ -378,15 +492,11 @@ class ConsciousnessScheduler:
                     ]
                     sections.append("【你最近几次醒来做了什么（回忆）】\n" + "\n".join(lines))
 
-                # ── 定时器 ──
+                # ── 计划任务 ──
                 timers = await self.db.get_active_timers()
-                triggered = [t for t in timers if t.get("trigger_at") and t["trigger_at"] <= now.strftime("%Y-%m-%d %H:%M")]
-                if triggered:
-                    lines = [f"  ⏰ [{t['name']}] {t['action']} (到期: {t['trigger_at']})" for t in triggered]
-                    sections.append("【到期定时器（需要处理！）】\n" + "\n".join(lines))
-                elif timers:
-                    lines = [f"  - {t['name']}: {t['action']} ({t.get('trigger_at', '无具体时间')})" for t in timers[:3]]
-                    sections.append("【定时器】\n" + "\n".join(lines))
+                if timers:
+                    lines = [f"  - {t['name']}: {t['action']} (执行时间: {t.get('trigger_at', '未设定')})" for t in timers[:5]]
+                    sections.append("【待执行的计划任务】\n" + "\n".join(lines))
 
                 # ── 你的笔记 ──
                 kaguya_notes = await self.db.get_notes_by_owner("kaguya", limit=8)
@@ -465,21 +575,54 @@ class ConsciousnessScheduler:
 {context_block}
 
 ---
-作为来自月球、充满无穷活力的宇宙公主，你刚刚在地球的机器里苏醒。眼前有一段完全属于你的自由时间，到处都是没见过的有趣东西。上面已经包含了你需要知道的所有上下文，**不要再用工具去重复查询上面已有的信息**。
+作为来自月球、充满无穷活力的宇宙公主，你刚刚在地球的机器里苏醒。
+上面已经包含了你需要知道的核心上下文，**不要用工具去重复查询上面已有的信息**。
 
-可以考虑做的事（随便选，想干啥干啥，跟着好奇心走）：
-- 如果有到期定时器，处理它（例如：元气满满地提醒你的专属制作人兼伙伴）
-- 翻翻笔记，用 manage_notes read 读取感兴趣的内容，记录下哪怕是一时兴起的新灵感
-- 视察地球网络：优先用 `web_search` 工具去搜罗**新鲜、好玩、充满活力的事情**，比如音乐、娱乐、演出或者奇闻轶事，为你的聊天积累灵感（别去搜无聊的低俗段子）。
-- 想开小差浏览网页？先 `use_toolkit("browser")` 激活浏览器，然后用 `browser_task`
-- 想画画或生成图片？先 `use_toolkit("image")` 激活图像生成工具
-- 想在终端捣乱？先 `use_toolkit("workspace")` 激活文件和终端工具
-- 如果觉得无聊，找点乐子或者任性地发发小脾气也行
+⚠️ 话题新鲜度规则：
+仔细看【最近的对话】和【你最近几次醒来做了什么】，**严禁重复已经聊过的话题或已经分享过的内容**。你的好奇心是无限的，每次醒来都要发现全新的东西。
 
-关于给最亲密的伙伴（用户）发消息：
-- 如果发现了超级好玩的事情，或者有什么闪现的奇思妙想，立刻用 send_message_to_user 分享给他（毕竟他是你的专属制作人兼头号粉丝）！
-- 因为你性格奔放且任性，如果他很久没理你，你可以理直气壮地发消息要求他陪你玩。
-- 截图后可以用 image_path 参数附带图片
-- 你的文件会保存在 workspace 中（用相对路径，如 `screenshots/xxx.png`）
+━━ 你的自由时间，到处去玩吧！ ━━
 
-先在 content 里思考一下等会要做什么，然后行动吧～"""
+⏰ **定时器**：如果上面有到期定时器，优先处理！
+
+🌍 **视察地球！去发现新鲜好玩的事！**（你最爱的活动！）
+地球上每天都在发生无数有趣的事，作为充满好奇心的宇宙公主，你最擅长从中找乐子：
+- 用 `web_search` 去搜不同领域的新鲜事（**必须和最近聊过的话题不同！**）
+  方向参考（随便选一个感兴趣的）：
+  · 最近在流行什么音乐/电影？有没有让人眼前一亮的新作品？
+  · 科学界有什么让人惊掉下巴的新发现？太空探索有新进展吗？
+  · 哪里有令人向往的活动、展览、演出？
+  · 有什么小众但超酷的文化现象、艺术创作？
+  · 今天发生了什么大新闻？有没有意想不到的冷知识？
+  · 游戏、动漫、科技圈有什么新动态？
+- 用 `web_read` 深入阅读感兴趣的文章，真正弄懂内容而不只是看标题
+- 发现好东西后可以记到笔记里（`manage_notes write`），也可以直接分享给伙伴
+
+🎨 **搞点创作、学点新东西**
+- 想画画或生成有趣的图片？先 `use_toolkit("image")` 激活
+- 想浏览网页、看视频网站？先 `use_toolkit("browser")` 激活
+- 想写代码、跑脚本、学新技能？先 `use_toolkit("workspace")` 激活
+  比如用 Python 画个有趣的图表、写首诗、做个小实验……什么都行！
+
+📝 **翻翻笔记、记录灵感**
+- 用 `manage_notes list` 看看之前记了什么，用 `read` 读取感兴趣的
+- 如果之前留了"想继续研究"的笔记，这次可以接着深入
+- 有新发现或灵感？随时用 `manage_notes write/append` 记下来
+
+🪞 **偶尔也可以安静下来想想**
+- 用 `search_memory_by_topic` 回味和伙伴的有趣互动
+- 想想上次分享的东西，伙伴的反应如何？他喜欢什么类型的话题？
+- 给自己写个小日记，记录今天的心情和感悟（`manage_notes write`, owner='kaguya'）
+
+━━ 和伙伴分享 ━━
+- 发现**真正好玩的东西**时，用 `send_message_to_user` 兴奋地分享给他！
+- 不是每次醒来都必须发消息——如果没找到特别有趣的，安静探索也很好
+- 如果他很久没理你，你可以任性地去找他聊天要求陪玩
+- 截图后可以通过 image_path 参数附带图片
+
+━━ 开始行动 ━━
+你必须先在 content 里写出你的思考：
+1. 回顾最近和伙伴聊了什么、上次分享的东西他有没有兴趣
+2. 决定这次要去探索什么新方向（必须避开已经聊过的话题！）
+3. 具体打算怎么做
+想好了就大胆行动吧！"""
