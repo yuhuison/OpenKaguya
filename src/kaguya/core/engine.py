@@ -109,6 +109,70 @@ class ChatEngine:
             logger.warning(f"恢复历史失败: {e}")
             self._histories[history_key] = []
 
+    @staticmethod
+    def _compress_image_if_needed(
+        image_path: str, max_bytes: int = 1 * 1024 * 1024, max_dimension: int = 1920
+    ) -> str:
+        """
+        如果图片文件大于 max_bytes，使用 Pillow 压缩后返回临时文件路径。
+        如果 Pillow 不可用或图片已足够小，则返回原始路径。
+        """
+        from pathlib import Path
+        path = Path(image_path)
+        if not path.exists():
+            return image_path
+        if path.stat().st_size <= max_bytes:
+            return image_path
+
+        try:
+            from PIL import Image
+        except ImportError:
+            logger.debug("Pillow 未安装，跳过图片压缩")
+            return image_path
+
+        try:
+            import tempfile
+            img = Image.open(path)
+
+            # RGBA → RGB（JPEG 不支持透明通道）
+            if img.mode in ("RGBA", "P"):
+                img = img.convert("RGB")
+
+            # 缩放到 max_dimension 以内
+            w, h = img.size
+            if max(w, h) > max_dimension:
+                ratio = max_dimension / max(w, h)
+                img = img.resize((int(w * ratio), int(h * ratio)), Image.LANCZOS)
+
+            # 逐步降低质量直到符合大小要求
+            for quality in (85, 70, 55, 40):
+                tmp = tempfile.NamedTemporaryFile(
+                    suffix=".jpg", delete=False, prefix="kaguya_img_"
+                )
+                img.save(tmp, format="JPEG", quality=quality, optimize=True)
+                tmp.close()
+                if Path(tmp.name).stat().st_size <= max_bytes:
+                    orig_kb = path.stat().st_size // 1024
+                    new_kb = Path(tmp.name).stat().st_size // 1024
+                    logger.info(
+                        f"🖼️ 图片已压缩: {orig_kb}KB → {new_kb}KB (quality={quality})"
+                    )
+                    return tmp.name
+                Path(tmp.name).unlink(missing_ok=True)
+
+            # 所有质量都试过了仍然太大，返回最低质量版本
+            tmp = tempfile.NamedTemporaryFile(
+                suffix=".jpg", delete=False, prefix="kaguya_img_"
+            )
+            img.save(tmp, format="JPEG", quality=30, optimize=True)
+            tmp.close()
+            logger.info(f"🖼️ 图片强制压缩到 quality=30")
+            return tmp.name
+
+        except Exception as e:
+            logger.warning(f"图片压缩失败: {e}，使用原始文件")
+            return image_path
+
     def _expand_image_placeholders(self, msg: dict) -> dict:
         """
         将历史消息中的 [workspace_image:user_id:filename] 展开为 multimodal 内容块。
@@ -431,7 +495,10 @@ class ChatEngine:
                         content = tc_args.get("content", "")
                         image_path = tc_args.get("image_path")
                         target_uid = tc_args.get("target_user_id")
-                        # 构建回调参数（仅在有 target_user_id 时传递，兼容普通回调）
+                        # 图片压缩（超过 1MB 时自动压缩）
+                        if image_path:
+                            image_path = self._compress_image_if_needed(image_path)
+                        # 构建回调参数（仅在有值时传递，兼容普通回调）
                         cb_kwargs = {}
                         if image_path:
                             cb_kwargs["image_path"] = image_path
@@ -464,6 +531,8 @@ class ChatEngine:
                             content = tc_args.get("content", "")
                             image_path = tc_args.get("image_path")
                             target_uid = tc_args.get("target_user_id")
+                            if image_path:
+                                image_path = self._compress_image_if_needed(image_path)
                             cb_kwargs = {}
                             if image_path:
                                 cb_kwargs["image_path"] = image_path
