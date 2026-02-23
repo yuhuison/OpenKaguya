@@ -21,6 +21,7 @@ uv.lock
 
 # Secrets — 绝对不要提交！
 config/secrets.toml
+config/default.toml
 
 # Runtime data
 data/
