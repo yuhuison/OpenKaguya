@@ -431,22 +431,22 @@ class ChatEngine:
                         content = tc_args.get("content", "")
                         image_path = tc_args.get("image_path")
                         target_uid = tc_args.get("target_user_id")
+                        # 构建回调参数（仅在有 target_user_id 时传递，兼容普通回调）
+                        cb_kwargs = {}
+                        if image_path:
+                            cb_kwargs["image_path"] = image_path
+                        if target_uid:
+                            cb_kwargs["target_user_id"] = target_uid
                         if content:
                             reply_messages.append(content)
                             if send_callback:
                                 try:
-                                    await send_callback(
-                                        content, image_path=image_path,
-                                        target_user_id=target_uid,
-                                    )
+                                    await send_callback(content, **cb_kwargs)
                                 except Exception as e:
                                     logger.error(f"即时发送失败: {e}")
                         elif image_path and send_callback:
                             try:
-                                await send_callback(
-                                    "", image_path=image_path,
-                                    target_user_id=target_uid,
-                                )
+                                await send_callback("", **cb_kwargs)
                             except Exception as e:
                                 logger.error(f"即时发送图片失败: {e}")
                         tool_result_content = "Message sent to user successfully."
@@ -461,26 +461,24 @@ class ChatEngine:
                                 tc_name = close[0]
 
                         if tc_name == "send_message_to_user":
-                            # 修正后走 send 分支
                             content = tc_args.get("content", "")
                             image_path = tc_args.get("image_path")
                             target_uid = tc_args.get("target_user_id")
+                            cb_kwargs = {}
+                            if image_path:
+                                cb_kwargs["image_path"] = image_path
+                            if target_uid:
+                                cb_kwargs["target_user_id"] = target_uid
                             if content:
                                 reply_messages.append(content)
                                 if send_callback:
                                     try:
-                                        await send_callback(
-                                            content, image_path=image_path,
-                                            target_user_id=target_uid,
-                                        )
+                                        await send_callback(content, **cb_kwargs)
                                     except Exception as e:
                                         logger.error(f"即时发送失败（修正后）: {e}")
                             elif image_path and send_callback:
                                 try:
-                                    await send_callback(
-                                        "", image_path=image_path,
-                                        target_user_id=target_uid,
-                                    )
+                                    await send_callback("", **cb_kwargs)
                                 except Exception as e:
                                     logger.error(f"即时发送图片失败（修正后）: {e}")
                             tool_result_content = "Message sent to user successfully."
