@@ -38,6 +38,8 @@ class LLMClient:
         tools: Optional[list[dict]] = None,
         temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
+        response_format: Optional[dict] = None,
+        **kwargs,
     ) -> dict[str, Any]:
         """
         发送聊天请求，返回完整的响应。
@@ -65,6 +67,9 @@ class LLMClient:
         if tools:
             kwargs["tools"] = tools
             kwargs["tool_choice"] = "auto"
+
+        if response_format:
+            kwargs["response_format"] = response_format
 
         try:
             response = await self._client.chat.completions.create(**kwargs)

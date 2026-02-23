@@ -114,7 +114,8 @@ class BrowserToolkit:
     def get_tools(self) -> list[Tool]:
         """获取所有浏览器工具"""
         return [
-            BrowserRunTaskTool(self),   # 首选！用于复杂浏览/搜索任务
+            # BrowserRunTaskTool 已移除：ChatOpenAI 兼容性问题频繁出错，
+            # 复杂搜索任务由 web_search 工具替代
             BrowserOpenTool(self),
             BrowserSearchTool(self),
             BrowserClickTool(self),

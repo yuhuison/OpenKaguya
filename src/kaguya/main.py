@@ -138,6 +138,15 @@ async def run_cli():
             tool_registry.register_all(web_tools)
             logger.info(f"🔍 网络搜索工具已注册 ({web_tools[0]._backend.provider_name})")
 
+    # 6d. 初始化子 Agent 工具
+    from kaguya.tools.sub_agent import SubAgentTool
+    sub_agent_tool = SubAgentTool(
+        primary_llm=primary_llm,
+        secondary_llm=secondary_llm,
+        tool_registry=tool_registry,
+    )
+    tool_registry.register(sub_agent_tool)
+
     # 7. 初始化用户身份管理器
     from kaguya.core.identity import UserIdentityManager, UserIdentity
 

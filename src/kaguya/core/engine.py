@@ -140,6 +140,7 @@ class ChatEngine:
 - 发送图片：send_message_to_user 支持 image_path 参数，你可以附带本地图片文件路径来给用户发送图片
 - 记忆系统：你能搜索历史对话记忆、写笔记、管理任务和技能
 - 接收图片：用户可以发图片给你，你能看到图片内容并理解
+- 子 Agent：你可以用 run_sub_agent 启动子 Agent 完成独立任务。选 'secondary' 用次级模型（快、上下文大，适合总结/提取长文本），选 'primary' 用主模型（适合复杂任务）
 
 你不能做的事：
 - 你不能直接访问用户的电脑文件，只能操作自己的工作区
@@ -267,9 +268,8 @@ class ChatEngine:
             
         messages = [{"role": "system", "content": base_system}]
 
-        # 添加历史消息（最多保留最近 N 条，自动展开历史中的图片占位符）
-        limit = self.config.memory.short_term_limit * 2
-        for hist_msg in history[-limit:]:
+        # 添加历史消息（使用全部 in-memory 历史，自动展开历史中的图片占位符）
+        for hist_msg in history:
             messages.append(self._expand_image_placeholders(hist_msg))
 
         # 添加当前用户消息（支持多模态：文本 + 图片）
@@ -455,11 +455,16 @@ class ChatEngine:
                 })
             history.append({
                 "role": "assistant",
+                "content": "",
                 "tool_calls": fake_tool_calls,
             })
             history.extend(tool_results)
+
+        # === 5.5 历史裁剪：按完整消息组为单位，超过限制后裁剪旧消息 ===
+        limit = self.config.memory.short_term_limit * 2
+        self._trim_history(history, limit)
             
-        # === 5. 执行后置中间件 ===
+        # === 6. 执行后置中间件 ===
         for mw in self.middlewares:
             try:
                 await mw.post_process(message, reply_messages)
@@ -467,3 +472,25 @@ class ChatEngine:
                 logger.error(f"中间件 {mw.name} 后置处理异常: {e}")
 
         return reply_messages
+
+    @staticmethod
+    def _trim_history(history: list[dict], limit: int) -> None:
+        """
+        裁剪历史到 limit 条以内，确保不切断消息组。
+
+        消息组定义：user → assistant(+tool_calls) → tool(results) 为一组。
+        裁剪点只能落在 user 消息的位置（即一组的起始），
+        这样就不会出现孤立的 tool 消息。
+        """
+        if len(history) <= limit:
+            return
+
+        # 从前往后跳过，直到剩余条数 <= limit
+        cut = len(history) - limit
+        # 确保 cut 不会落在 tool/assistant 消息上，向后推到下一个 user 消息
+        while cut < len(history) and history[cut]["role"] != "user":
+            cut += 1
+
+        if cut > 0 and cut < len(history):
+            del history[:cut]
+            logger.debug(f"历史裁剪: 移除了 {cut} 条旧消息，剩余 {len(history)} 条")
