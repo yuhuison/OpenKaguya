@@ -90,6 +90,7 @@ class AdminConfig:
     enabled: bool = True
     host: str = "127.0.0.1"
     port: int = 8080
+    password: str = ""  # 管理面板密码（明文，从 secrets.toml 读取）
 
 
 @dataclass
@@ -139,6 +140,23 @@ class IdentityConfig:
 
 
 @dataclass
+class ProviderEntry:
+    """单个 Provider 的配置"""
+
+    name: str = ""
+    model: str = ""
+    extra: dict = field(default_factory=dict)  # provider 特定参数
+
+
+@dataclass
+class ProvidersConfig:
+    """AI 能力提供者配置"""
+
+    enabled: list[str] = field(default_factory=list)  # 启用的 provider 名称
+    entries: dict[str, ProviderEntry] = field(default_factory=dict)  # name → config
+
+
+@dataclass
 class AppConfig:
     """应用总配置"""
 
@@ -150,6 +168,7 @@ class AppConfig:
     persona: PersonaConfig = field(default_factory=PersonaConfig)
     wechat: WeChatConfig = field(default_factory=WeChatConfig)
     identity: IdentityConfig = field(default_factory=IdentityConfig)
+    providers: ProvidersConfig = field(default_factory=ProvidersConfig)
 
 
 def _deep_get(d: dict, *keys: str, default: Any = None) -> Any:
@@ -259,6 +278,19 @@ def load_config(
         ))
     identity_config = IdentityConfig(users=identity_entries)
 
+    # 构建 Providers 配置
+    providers_raw = defaults.get("providers", {})
+    enabled_providers = providers_raw.get("enabled", [])
+    provider_entries = {}
+    for pname in enabled_providers:
+        pconf = providers_raw.get(pname, {})
+        provider_entries[pname] = ProviderEntry(
+            name=pname,
+            model=pconf.get("model", ""),
+            extra=pconf,
+        )
+    providers_config = ProvidersConfig(enabled=enabled_providers, entries=provider_entries)
+
     config = AppConfig(
         llm=llm_config,
         memory=MemoryConfig(
@@ -288,10 +320,12 @@ def load_config(
             enabled=_deep_get(defaults, "admin", "enabled", default=True),
             host=_deep_get(defaults, "admin", "host", default="127.0.0.1"),
             port=_deep_get(defaults, "admin", "port", default=8080),
+            password=_deep_get(secrets, "admin", "password", default=""),
         ),
         persona=persona_config,
         wechat=wechat_config,
         identity=identity_config,
+        providers=providers_config,
     )
 
     logger.info(f"配置加载完成: 主模型={config.llm.primary.model}, 次级模型={config.llm.secondary.model}")

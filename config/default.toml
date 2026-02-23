@@ -65,6 +65,14 @@ base_url = "http://open-kaguya.tech:8099"
 whitelist_users  = ["wxid_19dqn48qw92m22","wxid_uiepr13gqwaj22","wxid_d9dbtzc92jml21"]   # 如 ["wxid_alice123", "wxid_bob456"]
 whitelist_groups = []   # 如 ["12345678@chatroom"]
 
+# ===== AI 能力提供者 (Providers) =====
+[providers]
+enabled = ["qwen_image"]   # 启用的 provider 列表
+
+[providers.qwen_image]
+# 图像编辑模型: qwen-image-edit-max / qwen-image-edit-plus / qwen-image-edit
+edit_model = "qwen-image-edit-plus"
+
 # ===== 跨平台用户身份注册表 =====
 # 每个 [[identity.users]] 定义辉夜姬认识的一个人
 # accounts 格式: "平台:原始ID"（如 "wechat:wxid_xxx", "qq:12345"）

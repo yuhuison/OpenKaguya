@@ -45,11 +45,19 @@ class ChatEngine:
         primary_llm: LLMClient,
         tool_registry: ToolRegistry | None = None,
         workspace: WorkspaceManager | None = None,
+        adapters: list | None = None,
+        avatar_manager = None,
+        providers: list | None = None,
+        toolkit_router = None,
     ):
         self.config = config
         self.primary_llm = primary_llm
         self.tool_registry = tool_registry or ToolRegistry()
         self._workspace = workspace
+        self._adapters = adapters or []
+        self._avatar_manager = avatar_manager
+        self._providers = providers or []
+        self._toolkit_router = toolkit_router
 
         # 构建系统 Prompt
         persona = config.persona
@@ -122,7 +130,9 @@ class ChatEngine:
         likes_text = "、".join(persona.likes)
         dislikes_text = "、".join(persona.dislikes)
 
-        return f"""你是{persona.name}，{persona.age}岁，来自{persona.origin}。
+        return f"""
+[OpenKaguya]
+你是{persona.name}，{persona.age}岁，来自{persona.origin}。
 
 {persona.personality}
 
@@ -134,13 +144,17 @@ class ChatEngine:
 你不喜欢：{dislikes_text}
 
 你的能力（你可以做到这些事，在需要时主动使用）：
-- 浏览器：你能打开网页、搜索、点击、输入、截图。截图后可以通过 send_message_to_user 的 image_path 参数把截图发给用户
-- 文件操作：你有自己的文件空间，能读写文件、列目录
-- 终端命令：你能执行 shell 命令，包括运行 Python 脚本。比如你可以用 matplotlib 画图、用 Pillow 处理图片，然后把生成的图片发给用户
-- 发送图片：send_message_to_user 支持 image_path 参数，你可以附带本地图片文件路径来给用户发送图片
-- 记忆系统：你能搜索历史对话记忆、写笔记、管理任务和技能
+- 记忆系统：你能搜索历史对话记忆、写笔记、管理任务
+- 网络搜索：你能用 web_search 搜索互联网，用 web_read 阅读网页内容
+- 子 Agent：你可以用 run_sub_agent 启动子 Agent 完成独立任务。选 'secondary' 用次级模型（快、上下文大），选 'primary' 用主模型（适合复杂任务）
 - 接收图片：用户可以发图片给你，你能看到图片内容并理解
-- 子 Agent：你可以用 run_sub_agent 启动子 Agent 完成独立任务。选 'secondary' 用次级模型（快、上下文大，适合总结/提取长文本），选 'primary' 用主模型（适合复杂任务）
+- 发送图片：send_message_to_user 支持 image_path 参数，你可以附带本地图片文件路径来给用户发送图片
+
+扩展能力（需要先用 use_toolkit 激活对应工具组）：
+- use_toolkit("workspace")：文件读写、列目录、执行终端命令（如运行 Python 脚本、用 matplotlib 画图等）
+- use_toolkit("browser")：打开网页、搜索、点击、输入、截图等浏览器操作
+- use_toolkit("image")：用 AI 生成图片、编辑图片、换头像
+- use_toolkit("sns")：发朋友圈、点赞评论等社交操作
 
 你不能做的事：
 - 你不能直接访问用户的电脑文件，只能操作自己的工作区
@@ -265,8 +279,33 @@ class ChatEngine:
 
         if extra_system_prompts:
             base_system += "\n\n【系统附加信息】\n" + "\n".join(extra_system_prompts)
-            
+
+        # 注入 adapter 平台能力 prompt（chat 阶段）
+        for adapter in self._adapters:
+            try:
+                sys_p = adapter.get_system_prompt(phase="chat")
+                if sys_p:
+                    base_system += f"\n\n【{adapter.name} 平台能力】\n{sys_p}"
+            except Exception as e:
+                logger.warning(f"获取 {adapter.name} system prompt 失败: {e}")
+
+        # 注入 provider 能力 prompt（chat 阶段）
+        for prov in self._providers:
+            try:
+                sys_p = prov.get_system_prompt(phase="chat")
+                if sys_p:
+                    base_system += f"\n\n【{prov.name} 能力】\n{sys_p}"
+            except Exception as e:
+                logger.warning(f"获取 {prov.name} system prompt 失败: {e}")
+
         messages = [{"role": "system", "content": base_system}]
+
+        # 注入头像（vision multimodal，插入到 system 消息之后、历史之前）
+        if self._avatar_manager:
+            avatar_parts = self._avatar_manager.build_system_prompt_parts()
+            if avatar_parts:
+                messages.append({"role": "user", "content": avatar_parts})
+                messages.append({"role": "assistant", "content": "好的，我知道了，这就是我现在的样子！"})
 
         # 添加历史消息（使用全部 in-memory 历史，自动展开历史中的图片占位符）
         for hist_msg in history:
@@ -293,7 +332,10 @@ class ChatEngine:
             user_msg = {"role": "user", "content": text_content}
         messages.append(user_msg)
 
-        tools = [self.SEND_MESSAGE_TOOL] + self.tool_registry.get_openai_tools()
+        if self._toolkit_router:
+            tools = [self.SEND_MESSAGE_TOOL] + self._toolkit_router.get_visible_tools()
+        else:
+            tools = [self.SEND_MESSAGE_TOOL] + self.tool_registry.get_openai_tools()
         # 设置用户上下文（让 workspace/记忆工具知道当前用户）
         self.tool_registry.set_user_context(user_id)
         reply_messages: list[str] = []
@@ -396,6 +438,10 @@ class ChatEngine:
                             # 通过 ToolRegistry 分发执行
                             has_non_send_tool = True
                             tool_result_content = await self.tool_registry.execute(tc_name, tc_args)
+
+                            # use_toolkit 激活后刷新工具列表，下次迭代 LLM 可见新工具
+                            if tc_name == "use_toolkit" and self._toolkit_router:
+                                tools = [self.SEND_MESSAGE_TOOL] + self._toolkit_router.get_visible_tools()
 
 
                     logger.debug(f"🔧 工具结果: {tc_name} → {str(tool_result_content)[:500]}")

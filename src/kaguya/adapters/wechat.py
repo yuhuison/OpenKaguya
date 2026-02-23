@@ -515,3 +515,69 @@ class WeChatAdapter(PlatformAdapter):
         if "：" in push_content:
             return push_content.split("：", 1)[0].strip()
         return ""
+
+    # ==================== 平台专属能力 ====================
+
+    def get_tools(self, phase: str = "chat") -> list:
+        """返回微信平台专属工具"""
+        from kaguya.adapters.wechat_tools import create_sns_tools
+
+        if not self._session:
+            return []
+
+        return create_sns_tools(
+            session=self._session,
+            base_url=self.config.base_url,
+            api_key=self.config.api_key,
+            identity_manager=self.identity,
+            phase=phase,
+        )
+
+    def get_system_prompt(self, phase: str = "chat") -> str:
+        """返回微信平台能力描述"""
+        if phase == "consciousness":
+            return (
+                "你当前连接的是微信平台。你可以：\n"
+                "- 用 sns_post 发朋友圈（支持纯文字和图文）\n"
+                "- 用 sns_interact 给好友的朋友圈点赞或评论\n"
+                "- 用 sns_view_detail 查看某条朋友圈的完整内容和评论\n"
+                "下方会给你最新的朋友圈动态和通知，你可以自行决定是否回应。"
+            )
+        else:
+            return (
+                "你当前通过微信与好朋友聊天。"
+                "你可以用 sns_interact 给好友的朋友圈点赞或评论。"
+            )
+
+    async def get_injected_prompt(self, phase: str = "chat") -> str:
+        """获取实时朋友圈数据注入 prompt"""
+        if phase != "consciousness":
+            return ""
+
+        if not self._session:
+            return ""
+
+        from kaguya.adapters.wechat_tools import fetch_timeline, fetch_notifications
+
+        parts = []
+
+        try:
+            timeline = await fetch_timeline(
+                self._session, self.config.base_url, self.config.api_key,
+            )
+            if timeline:
+                parts.append(timeline)
+        except Exception as e:
+            logger.error(f"获取朋友圈首页失败: {e}")
+
+        try:
+            notifications = await fetch_notifications(
+                self._session, self.config.base_url, self.config.api_key,
+            )
+            if notifications:
+                parts.append(notifications)
+        except Exception as e:
+            logger.error(f"获取朋友圈通知失败: {e}")
+
+        return "\n\n".join(parts)
+

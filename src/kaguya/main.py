@@ -147,6 +147,44 @@ async def run_cli():
     )
     tool_registry.register(sub_agent_tool)
 
+    # 6e. 初始化头像管理器
+    from kaguya.tools.avatar import AvatarManager, SetAvatarTool
+    avatar_manager = AvatarManager(workspace.kaguya_dir)
+    avatar_manager.init_from_config()
+    tool_registry.register(SetAvatarTool(avatar_manager))
+
+    # 6f. 初始化 AI 能力 Providers
+    all_providers = []
+    if config.providers.enabled:
+        for pname in config.providers.enabled:
+            try:
+                if pname == "qwen_image":
+                    from kaguya.providers.qwen_image import QwenImageProvider
+                    pentry = config.providers.entries.get(pname, {})
+                    edit_model = getattr(pentry, 'extra', {}).get('edit_model', 'qwen-image-edit-max') if pentry else 'qwen-image-edit-max'
+                    _dashscope_key = _secrets.get("dashscope", {}).get("api_key", "")
+                    if _dashscope_key:
+                        provider = QwenImageProvider(
+                            api_key=_dashscope_key,
+                            workspace=workspace,
+                            edit_model=edit_model,
+                        )
+                        all_providers.append(provider)
+                        logger.info(f"🎨 已初始化 Provider: {pname}")
+                    else:
+                        logger.warning(f"Provider {pname} 缺少 DashScope API Key，跳过")
+                else:
+                    logger.warning(f"未知的 Provider: {pname}，跳过")
+            except Exception as e:
+                logger.error(f"初始化 Provider {pname} 失败: {e}")
+
+    # 注册 provider 的 chat 阶段工具
+    for p in all_providers:
+        p_tools = p.get_tools(phase="chat")
+        if p_tools:
+            tool_registry.register_all(p_tools)
+            logger.info(f"🔧 已注册 {p.name} 工具 ({len(p_tools)} 个)")
+
     # 7. 初始化用户身份管理器
     from kaguya.core.identity import UserIdentityManager, UserIdentity
 
@@ -162,12 +200,46 @@ async def run_cli():
     ]
     identity_mgr = UserIdentityManager(identities)
 
+    # 条件初始化微信适配器
+    wechat_adapter = None
+    if config.wechat.enabled:
+        from kaguya.adapters.wechat import WeChatAdapter
+        wechat_adapter = WeChatAdapter(
+            config=config.wechat,
+            identity_manager=identity_mgr,
+            workspace=workspace,
+        )
+
     # 8. 初始化对话引擎 & 注册中间件
+    # 收集所有活跃的 adapter（用于工具和 prompt 注入）
+    all_adapters = [a for a in [wechat_adapter] if a is not None]
+
+    # 注册 chat 阶段的 adapter 工具
+    for ada in all_adapters:
+        chat_tools = ada.get_tools(phase="chat")
+        if chat_tools:
+            tool_registry.register_all(chat_tools)
+            logger.info(f"🔧 已注册 {ada.name} 平台工具 ({len(chat_tools)} 个)")
+
+    # 8a. 初始化 Toolkit 路由器（所有工具注册完毕后）
+    from kaguya.tools.toolkit_router import ToolkitRouter, UseToolkitTool
+    toolkit_router = ToolkitRouter(tool_registry)
+    tool_registry.register(UseToolkitTool(toolkit_router))
+    logger.info(
+        f"🔧 Toolkit 路由器已初始化 "
+        f"(核心工具: {len(toolkit_router.get_visible_tools())} 个, "
+        f"总工具: {len(tool_registry.tool_names)} 个)"
+    )
+
     engine = ChatEngine(
         config=config,
         primary_llm=primary_llm,
         tool_registry=tool_registry,
         workspace=workspace,
+        adapters=all_adapters,
+        avatar_manager=avatar_manager,
+        providers=all_providers,
+        toolkit_router=toolkit_router,
     )
     # 注册中间件（顺序重要：群聊过滤 → 记忆系统）
     from kaguya.core.group import GroupFilterMiddleware
@@ -177,15 +249,8 @@ async def run_cli():
     engine.add_middleware(group_filter)
     engine.add_middleware(memory_mw)
 
-    # 条件启动微信适配器（先初始化，后面给 consciousness 用）
-    wechat_adapter = None
-    if config.wechat.enabled:
-        from kaguya.adapters.wechat import WeChatAdapter
-        wechat_adapter = WeChatAdapter(
-            config=config.wechat,
-            identity_manager=identity_mgr,
-            workspace=workspace,
-        )
+    # 设置 adapter handler（engine 已创建）
+    if wechat_adapter:
         wechat_adapter.set_handler(engine.handle_message)
 
     # 9. 初始化主动意识系统
@@ -217,6 +282,8 @@ async def run_cli():
         db=db,
         secondary_llm=secondary_llm,
         target_user_id=consciousness_target_user,
+        adapters=all_adapters,
+        providers=all_providers,
     )
 
     # 10. 初始化 CLI 适配器（仅交互模式）
@@ -228,7 +295,18 @@ async def run_cli():
         adapter = CLIAdapter()
         adapter.set_handler(engine.handle_message)
 
-    # 11. 启动
+    # 11. 启动管理面板
+    admin_runner = None
+    if config.admin.enabled:
+        from kaguya.admin import start_admin_server
+        admin_runner = await start_admin_server(
+            db=db,
+            host=config.admin.host,
+            port=config.admin.port,
+            password=config.admin.password,
+        )
+
+    # 12. 启动
     logger.info("🌙 OpenKaguya 启动中...")
     await consciousness.start()
     if wechat_adapter:
@@ -256,6 +334,8 @@ async def run_cli():
             await adapter.stop()
         if wechat_adapter:
             await wechat_adapter.stop()
+        if admin_runner:
+            await admin_runner.cleanup()
         if browser_toolkit:
             await browser_toolkit.close()
         await db.close()

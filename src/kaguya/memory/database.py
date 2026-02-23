@@ -749,3 +749,72 @@ class Database:
             self._conn.execute("DELETE FROM timers WHERE id = ?", (timer_id,))
             self._conn.commit()
         await asyncio.to_thread(_del)
+
+    # ==================== 管理面板 API ====================
+
+    async def admin_get_all_users(self) -> list[dict]:
+        """获取所有用户列表（含统计）"""
+        def _get():
+            rows = self._conn.execute("""
+                SELECT user_id, platform, COUNT(*) as msg_count,
+                       MAX(created_at) as last_active
+                FROM messages
+                GROUP BY user_id, platform
+                ORDER BY last_active DESC
+            """).fetchall()
+            return [dict(r) for r in rows]
+        return await asyncio.to_thread(_get)
+
+    async def admin_get_messages(
+        self, user_id: str, limit: int = 50, offset: int = 0
+    ) -> list[dict]:
+        """分页获取用户消息"""
+        def _get():
+            rows = self._conn.execute("""
+                SELECT id, user_id, platform, role, content,
+                       display_content, tool_calls, created_at, is_archived
+                FROM messages
+                WHERE user_id = ?
+                ORDER BY created_at DESC
+                LIMIT ? OFFSET ?
+            """, (user_id, limit, offset)).fetchall()
+            return [dict(r) for r in rows]
+        return await asyncio.to_thread(_get)
+
+    async def admin_get_stats(self) -> dict:
+        """获取仪表盘统计数据"""
+        def _get():
+            c = self._conn
+            total_msgs = c.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
+            total_topics = c.execute("SELECT COUNT(*) FROM topics").fetchone()[0]
+            total_users = c.execute(
+                "SELECT COUNT(DISTINCT user_id) FROM messages"
+            ).fetchone()[0]
+            today_msgs = c.execute(
+                "SELECT COUNT(*) FROM messages WHERE date(created_at) = date('now')"
+            ).fetchone()[0]
+            total_notes = c.execute("SELECT COUNT(*) FROM notebook").fetchone()[0]
+            total_timers = c.execute(
+                "SELECT COUNT(*) FROM timers WHERE is_active = TRUE"
+            ).fetchone()[0]
+            return {
+                "total_messages": total_msgs,
+                "total_topics": total_topics,
+                "total_users": total_users,
+                "today_messages": today_msgs,
+                "total_notes": total_notes,
+                "active_timers": total_timers,
+            }
+        return await asyncio.to_thread(_get)
+
+    async def admin_get_all_notes(self) -> list[dict]:
+        """获取所有笔记"""
+        def _get():
+            rows = self._conn.execute("""
+                SELECT id, owner_id, title, content, tags, created_at, updated_at
+                FROM notebook
+                ORDER BY updated_at DESC
+            """).fetchall()
+            return [dict(r) for r in rows]
+        return await asyncio.to_thread(_get)
+

@@ -5,7 +5,10 @@
 from __future__ import annotations
 
 import abc
-from typing import Callable, Coroutine, Any
+from typing import Callable, Coroutine, Any, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from kaguya.tools.registry import Tool
 
 from kaguya.core.types import UnifiedMessage
 
@@ -22,6 +25,7 @@ class PlatformAdapter(abc.ABC):
     适配器负责：
     1. 将平台特定消息转换为 UnifiedMessage
     2. 将回复消息发送到平台
+    3. 提供平台专属工具和 prompt（可选）
     """
 
     def __init__(self, name: str):
@@ -51,3 +55,35 @@ class PlatformAdapter(abc.ABC):
     ) -> None:
         """发送消息到平台"""
         ...
+
+    # ─── 平台专属能力（子类可选重写） ───
+
+    def get_tools(self, phase: str = "chat") -> list["Tool"]:
+        """
+        返回该 adapter 提供的平台专属工具。
+
+        Args:
+            phase: 'chat'（用户聊天阶段）或 'consciousness'（自我意识阶段）,
+                   不同阶段可返回不同工具集。
+        """
+        return []
+
+    def get_system_prompt(self, phase: str = "chat") -> str:
+        """
+        返回平台能力描述 prompt（静态说明辉夜姬在该平台能做什么）。
+
+        Args:
+            phase: 'chat' 或 'consciousness'
+        """
+        return ""
+
+    async def get_injected_prompt(self, phase: str = "chat") -> str:
+        """
+        返回实时数据注入 prompt（如朋友圈内容、通知等）。
+        async 因为可能需要调用外部 API 获取数据。
+
+        Args:
+            phase: 'chat' 或 'consciousness'
+        """
+        return ""
+

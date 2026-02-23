@@ -41,6 +41,8 @@ class ConsciousnessScheduler:
         db=None,              # Database 实例
         secondary_llm=None,   # LLMClient (次级模型, 用于行动总结)
         target_user_id: str = "",  # 消息发送目标用户 ID
+        adapters: list | None = None,  # PlatformAdapter 列表
+        providers: list | None = None,  # BaseProvider 列表
     ):
         self.config = config
         self.chat_engine = chat_engine
@@ -48,6 +50,8 @@ class ConsciousnessScheduler:
         self.db = db
         self.secondary_llm = secondary_llm
         self.target_user_id = target_user_id
+        self._adapters = adapters or []
+        self._providers = providers or []
         self._lock = asyncio.Lock()
         self._running = False
         self._task: asyncio.Task | None = None
@@ -119,6 +123,20 @@ class ConsciousnessScheduler:
         async with self._lock:
             try:
                 logger.info("🌅 辉夜姬醒来了...")
+
+                # 0. 注册 adapter 意识阶段工具
+                for adapter in self._adapters:
+                    tools = adapter.get_tools(phase="consciousness")
+                    if tools:
+                        self.chat_engine.tool_registry.register_all(tools)
+                        logger.debug(f"已注册 {adapter.name} 意识阶段工具 ({len(tools)} 个)")
+
+                # 0b. 注册 provider 意识阶段工具
+                for prov in self._providers:
+                    tools = prov.get_tools(phase="consciousness")
+                    if tools:
+                        self.chat_engine.tool_registry.register_all(tools)
+                        logger.debug(f"已注册 {prov.name} 意识阶段工具 ({len(tools)} 个)")
 
                 # 1. 构建唤醒 prompt
                 wake_prompt = await self._build_wake_prompt()
@@ -368,7 +386,38 @@ class ConsciousnessScheduler:
 
         context_block = "\n\n".join(sections) if sections else "（暂无数据）"
 
-        return f"""[系统唤醒 — 主动意识模式]
+        # ── 注入 adapter prompts ──
+        adapter_sections = []
+        for adapter in self._adapters:
+            try:
+                sys_prompt = adapter.get_system_prompt(phase="consciousness")
+                if sys_prompt:
+                    adapter_sections.append(sys_prompt)
+                injected = await adapter.get_injected_prompt(phase="consciousness")
+                if injected:
+                    adapter_sections.append(injected)
+            except Exception as e:
+                logger.warning(f"获取 {adapter.name} adapter prompt 失败: {e}")
+
+        # ── 注入 provider prompts ──
+        for prov in self._providers:
+            try:
+                sys_prompt = prov.get_system_prompt(phase="consciousness")
+                if sys_prompt:
+                    adapter_sections.append(sys_prompt)
+                injected = await prov.get_injected_prompt(phase="consciousness")
+                if injected:
+                    adapter_sections.append(injected)
+            except Exception as e:
+                logger.warning(f"获取 {prov.name} provider prompt 失败: {e}")
+
+        adapter_block = "\n\n".join(adapter_sections)
+        if adapter_block:
+            context_block += f"\n\n{adapter_block}"
+
+        return f"""
+[OpenKaguya]
+[系统唤醒 — 主动意识模式]
 
 当前时间: {time_str} ({period})
 
@@ -380,8 +429,10 @@ class ConsciousnessScheduler:
 可以考虑做的事（随便选，想干啥干啥，跟着好奇心走）：
 - 如果有到期定时器，处理它（例如：给好朋友发消息提醒他们）
 - 翻翻笔记，用 manage_notes read 读取感兴趣的内容，写点新发现
-- 上网看看有什么新鲜事：**优先用 `web_search` 工具**搜索感兴趣的内容，速度很快；如果需要深入浏览某个网页才用 `browser_task`
-- 在文件空间折腾点小玩意，比如写个 Python 脚本或者用画图工具随便画画
+- 上网看看有什么新鲜事：**优先用 `web_search` 工具**搜索感兴趣的内容，速度很快
+- 想深入浏览某个网页？先 `use_toolkit("browser")` 激活浏览器，然后用 `browser_task`
+- 想画画或生成图片？先 `use_toolkit("image")` 激活图像工具
+- 想在文件空间折腾？先 `use_toolkit("workspace")` 激活文件和终端工具
 - 如果觉得没意思，继续睡或者发发小脾气也行
 
 关于给好朋友发消息：
