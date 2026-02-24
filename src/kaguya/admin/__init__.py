@@ -64,6 +64,8 @@ async def start_admin_server(
     host: str = "127.0.0.1",
     port: int = 8080,
     password: str = "",
+    consciousness=None,
+    engine=None,
 ) -> web.AppRunner:
     """
     启动管理面板 HTTP 服务器。
@@ -78,7 +80,7 @@ async def start_admin_server(
     app["_salt"] = salt
 
     # 注册 API 路由
-    api_routes = create_api_routes(db)
+    api_routes = create_api_routes(db, consciousness=consciousness, engine=engine)
     app.router.add_routes(api_routes)
 
     # 登录 API

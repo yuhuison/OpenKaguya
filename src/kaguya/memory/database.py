@@ -767,12 +767,13 @@ class Database:
         return [{"id": r[0], "name": r[1], "action": r[2], "trigger_at": r[3], "cron": r[4], "recurring": r[5], "last_triggered": r[6]} for r in rows]
 
     async def get_triggered_timers(self) -> list[dict]:
+        """获取所有已到期的活跃定时器（含一次性和周期性）"""
         def _get():
             return self._conn.execute(
-                "SELECT id, name, action, trigger_at FROM timers WHERE is_active = TRUE AND is_recurring = FALSE AND trigger_at <= datetime('now', 'localtime')",
+                "SELECT id, name, action, trigger_at, cron_expression, is_recurring FROM timers WHERE is_active = TRUE AND trigger_at <= datetime('now', 'localtime')",
             ).fetchall()
         rows = await asyncio.to_thread(_get)
-        return [{"id": r[0], "name": r[1], "action": r[2], "trigger_at": r[3]} for r in rows]
+        return [{"id": r[0], "name": r[1], "action": r[2], "trigger_at": r[3], "cron": r[4], "recurring": r[5]} for r in rows]
 
     async def deactivate_timer(self, timer_id: int) -> None:
         def _update():
@@ -787,6 +788,17 @@ class Database:
             self._conn.commit()
         async with self._write_lock:
             await asyncio.to_thread(_del)
+
+    async def reschedule_timer(self, timer_id: int, next_trigger_at: str) -> None:
+        """更新周期任务的下次触发时间（并记录本次触发时间）"""
+        def _update():
+            self._conn.execute(
+                "UPDATE timers SET trigger_at = ?, last_triggered_at = CURRENT_TIMESTAMP WHERE id = ?",
+                (next_trigger_at, timer_id),
+            )
+            self._conn.commit()
+        async with self._write_lock:
+            await asyncio.to_thread(_update)
 
     # ==================== 管理面板 API ====================
 

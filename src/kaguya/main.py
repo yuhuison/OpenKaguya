@@ -303,6 +303,8 @@ async def run_cli():
             host=config.admin.host,
             port=config.admin.port,
             password=config.admin.password,
+            consciousness=consciousness,
+            engine=engine,
         )
 
     # 12. 启动

@@ -17,6 +17,7 @@ class Platform(str, Enum):
     QQ = "qq"
     WECHAT = "wechat"
     CLI = "cli"
+    WEB = "web"        # 管理面板测试聊天
     SYSTEM = "system"  # 系统内部（主动意识等）
 
 

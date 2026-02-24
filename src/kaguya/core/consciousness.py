@@ -128,11 +128,104 @@ class ConsciousnessScheduler:
                 triggered = await self.db.get_triggered_timers()
                 for timer in triggered:
                     logger.info(f"⏰ 计划任务到期: [{timer['name']}] {timer['action']}")
-                    await self.db.deactivate_timer(timer["id"])
+
+                    is_recurring = timer.get("recurring", False)
+                    repeat_pattern = timer.get("cron") or "none"
+
+                    if is_recurring and repeat_pattern != "none":
+                        # 周期任务：计算下次触发时间，更新 DB
+                        next_time = self._calc_next_trigger(
+                            timer["trigger_at"], repeat_pattern
+                        )
+                        await self.db.reschedule_timer(timer["id"], next_time)
+                        logger.info(
+                            f"🔁 周期任务已重新调度: [{timer['name']}] "
+                            f"下次执行: {next_time}"
+                        )
+                    else:
+                        # 一次性任务：直接停用
+                        await self.db.deactivate_timer(timer["id"])
+
                     # 触发专属任务唤醒
                     await self._execute_task_wake(timer)
             except Exception as e:
                 logger.error(f"计划任务检查出错: {e}")
+
+    @staticmethod
+    def _calc_next_trigger(current_trigger: str, repeat: str) -> str:
+        """
+        根据重复模式计算下次触发时间。
+
+        支持的模式：
+        - daily: 每天同一时间
+        - weekdays: 工作日，跳过周六日
+        - weekly: 每周同一天同一时间
+        - monthly: 每月同一天
+        - Xm: 每 X 分钟（如 '30m'）
+        - Xh: 每 X 小时（如 '2h'）
+        """
+        import re as _re
+        from datetime import timedelta
+
+        try:
+            base = datetime.strptime(current_trigger, "%Y-%m-%d %H:%M")
+        except Exception:
+            # 无法解析，默认 1 天后
+            base = datetime.now()
+
+        now = datetime.now()
+
+        if repeat == "daily":
+            next_t = base + timedelta(days=1)
+            # 如果算出来的时间仍然在过去，持续加天
+            while next_t <= now:
+                next_t += timedelta(days=1)
+
+        elif repeat == "weekdays":
+            next_t = base + timedelta(days=1)
+            while next_t <= now or next_t.weekday() >= 5:  # 5=Sat, 6=Sun
+                next_t += timedelta(days=1)
+
+        elif repeat == "weekly":
+            next_t = base + timedelta(weeks=1)
+            while next_t <= now:
+                next_t += timedelta(weeks=1)
+
+        elif repeat == "monthly":
+            # 简单实现：同一天下月
+            month = base.month + 1
+            year = base.year
+            if month > 12:
+                month = 1
+                year += 1
+            day = min(base.day, 28)  # 安全处理月末
+            next_t = base.replace(year=year, month=month, day=day)
+            while next_t <= now:
+                month = next_t.month + 1
+                year = next_t.year
+                if month > 12:
+                    month = 1
+                    year += 1
+                next_t = next_t.replace(year=year, month=month)
+
+        else:
+            # 自定义间隔：'30m', '2h' 等
+            m = _re.match(r'^(\d+)([mh])$', repeat)
+            if m:
+                value = int(m.group(1))
+                unit = m.group(2)
+                delta = timedelta(
+                    minutes=value if unit == 'm' else 0,
+                    hours=value if unit == 'h' else 0,
+                )
+                next_t = base + delta
+                while next_t <= now:
+                    next_t += delta
+            else:
+                # 无法识别的模式，默认 1 天
+                next_t = now + timedelta(days=1)
+
+        return next_t.strftime("%Y-%m-%d %H:%M")
 
     # ─── 核心唤醒流程 ───
 

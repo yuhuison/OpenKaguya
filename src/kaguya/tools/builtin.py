@@ -473,7 +473,15 @@ class ManageNotesTool(Tool):
 
 
 class ScheduleTaskTool(Tool):
-    """计划一次未来的唤醒任务"""
+    """计划未来的唤醒任务（支持一次性和周期性）"""
+
+    REPEAT_LABELS = {
+        "none": "一次性",
+        "daily": "每天",
+        "weekdays": "工作日",
+        "weekly": "每周",
+        "monthly": "每月",
+    }
 
     def __init__(self, db: Database):
         self._db = db
@@ -485,8 +493,12 @@ class ScheduleTaskTool(Tool):
     @property
     def description(self):
         return (
-            "计划一次未来的唤醒任务。到指定时间后，你会被自动唤醒并执行该任务。"
-            "用途举例：用户说'两小时后提醒我开会'，你就计划一次两小时后的唤醒，到时候你会自动醒来提醒他。"
+            "计划未来的唤醒任务（像闹钟一样）。到指定时间后，你会被自动唤醒并执行该任务。\n"
+            "支持一次性和周期性任务：\n"
+            "- 一次性：'两小时后提醒我开会'\n"
+            "- 每天重复：'每天早上9点给我讲个冷知识'\n"
+            "- 工作日：'工作日每天8:30提醒我打卡'\n"
+            "- 自定义间隔：'每2小时提醒我喝水'\n"
             "必须包含明确的任务描述和触发时间。"
         )
 
@@ -510,7 +522,16 @@ class ScheduleTaskTool(Tool):
                 },
                 "trigger_at": {
                     "type": "string",
-                    "description": "唤醒时间，格式 YYYY-MM-DD HH:MM。根据当前时间计算。",
+                    "description": "首次唤醒时间，格式 YYYY-MM-DD HH:MM。根据当前时间计算。",
+                },
+                "repeat": {
+                    "type": "string",
+                    "description": (
+                        "重复模式（可选，默认 none 一次性）。"
+                        "可选值：none（一次性）、daily（每天）、weekdays（工作日 Mon-Fri）、"
+                        "weekly（每周）、monthly（每月）。"
+                        "也支持自定义间隔：如 '30m'（每30分钟）、'2h'（每2小时）。"
+                    ),
                 },
                 "timer_id": {"type": "integer", "description": "任务 ID（delete 时必填）"},
             },
@@ -522,6 +543,7 @@ class ScheduleTaskTool(Tool):
             name = kwargs.get("name", "未命名任务")
             task_desc = kwargs.get("task_description", kwargs.get("action_desc", ""))
             trigger_at = kwargs.get("trigger_at")
+            repeat = kwargs.get("repeat", "none") or "none"
             if not task_desc:
                 return "需要 task_description 参数（到时候要做什么）。"
             if not trigger_at:
@@ -529,8 +551,19 @@ class ScheduleTaskTool(Tool):
             # 自动附加请求用户上下文
             user_id = self._current_user_id or "unknown"
             full_desc = f"[请求用户: {user_id}] {task_desc}"
-            timer_id = await self._db.save_timer(name, full_desc, trigger_at=trigger_at)
-            return f"✅ 任务已计划 (ID: {timer_id}): {name}\n触发时间: {trigger_at}\n到时候我会自动醒来执行！"
+            is_recurring = repeat != "none"
+            timer_id = await self._db.save_timer(
+                name, full_desc,
+                trigger_at=trigger_at,
+                cron_expression=repeat,
+                is_recurring=is_recurring,
+            )
+            repeat_label = self.REPEAT_LABELS.get(repeat, f"每{repeat}")
+            result = f"✅ 任务已计划 (ID: {timer_id}): {name}\n首次执行: {trigger_at}"
+            if is_recurring:
+                result += f"\n重复: {repeat_label}"
+            result += "\n到时候我会自动醒来执行！"
+            return result
 
         elif action == "list":
             timers = await self._db.get_active_timers()
@@ -538,9 +571,13 @@ class ScheduleTaskTool(Tool):
                 return "没有待执行的计划任务。"
             lines = ["📋 计划任务列表:"]
             for t in timers:
+                repeat = t.get("cron") or "none"
+                repeat_label = self.REPEAT_LABELS.get(repeat, f"每{repeat}")
                 lines.append(f"  [{t['id']}] {t['name']}: {t['action']}")
-                if t["trigger_at"]:
-                    lines.append(f"      执行时间: {t['trigger_at']}")
+                time_info = f"      下次执行: {t['trigger_at'] or '未设定'}"
+                if repeat != "none":
+                    time_info += f" | 重复: {repeat_label}"
+                lines.append(time_info)
             return "\n".join(lines)
 
         elif action == "delete":
@@ -551,6 +588,7 @@ class ScheduleTaskTool(Tool):
             return f"任务 {timer_id} 已取消"
 
         return f"未知操作: {action}"
+
 
 
 # ========================= 工厂函数 =========================

@@ -1,756 +1,1503 @@
 <!DOCTYPE html>
 <html lang="zh-CN">
+
 <head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>🌙 OpenKaguya Admin</title>
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
-<style>
-/* ==================== Reset & Base ==================== */
-*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>🌙 OpenKaguya Admin</title>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <style>
+    /* ==================== Reset & Base ==================== */
+    *,
+    *::before,
+    *::after {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
 
-:root {
-  --bg-primary: #0b1120;
-  --bg-secondary: #111827;
-  --bg-card: #1a2332;
-  --bg-card-hover: #1f2b3d;
-  --bg-input: #0f1923;
-  --border: #2a3544;
-  --text-primary: #e8ecf1;
-  --text-secondary: #8899aa;
-  --text-muted: #5a6a7a;
-  --accent-purple: #8b5cf6;
-  --accent-blue: #3b82f6;
-  --accent-teal: #14b8a6;
-  --accent-pink: #ec4899;
-  --accent-amber: #f59e0b;
-  --accent-green: #22c55e;
-  --gradient-purple: linear-gradient(135deg, #7c3aed 0%, #a855f7 100%);
-  --gradient-blue: linear-gradient(135deg, #2563eb 0%, #3b82f6 100%);
-  --gradient-teal: linear-gradient(135deg, #0d9488 0%, #14b8a6 100%);
-  --gradient-pink: linear-gradient(135deg, #db2777 0%, #ec4899 100%);
-  --gradient-amber: linear-gradient(135deg, #d97706 0%, #f59e0b 100%);
-  --gradient-green: linear-gradient(135deg, #16a34a 0%, #22c55e 100%);
-  --radius: 12px;
-  --radius-sm: 8px;
-  --shadow: 0 4px 24px rgba(0,0,0,0.3);
-  --transition: all 0.2s ease;
-}
+    :root {
+      --bg-primary: #0b1120;
+      --bg-secondary: #111827;
+      --bg-card: #1a2332;
+      --bg-card-hover: #1f2b3d;
+      --bg-input: #0f1923;
+      --border: #2a3544;
+      --text-primary: #e8ecf1;
+      --text-secondary: #8899aa;
+      --text-muted: #5a6a7a;
+      --accent-purple: #8b5cf6;
+      --accent-blue: #3b82f6;
+      --accent-teal: #14b8a6;
+      --accent-pink: #ec4899;
+      --accent-amber: #f59e0b;
+      --accent-green: #22c55e;
+      --gradient-purple: linear-gradient(135deg, #7c3aed 0%, #a855f7 100%);
+      --gradient-blue: linear-gradient(135deg, #2563eb 0%, #3b82f6 100%);
+      --gradient-teal: linear-gradient(135deg, #0d9488 0%, #14b8a6 100%);
+      --gradient-pink: linear-gradient(135deg, #db2777 0%, #ec4899 100%);
+      --gradient-amber: linear-gradient(135deg, #d97706 0%, #f59e0b 100%);
+      --gradient-green: linear-gradient(135deg, #16a34a 0%, #22c55e 100%);
+      --radius: 12px;
+      --radius-sm: 8px;
+      --shadow: 0 4px 24px rgba(0, 0, 0, 0.3);
+      --transition: all 0.2s ease;
+    }
 
-body {
-  font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
-  background: var(--bg-primary);
-  color: var(--text-primary);
-  min-height: 100vh;
-  display: flex;
-}
+    body {
+      font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+      background: var(--bg-primary);
+      color: var(--text-primary);
+      min-height: 100vh;
+      display: flex;
+    }
 
-/* ==================== Sidebar ==================== */
-.sidebar {
-  width: 220px;
-  background: var(--bg-secondary);
-  border-right: 1px solid var(--border);
-  display: flex;
-  flex-direction: column;
-  position: fixed;
-  top: 0; left: 0; bottom: 0;
-  z-index: 100;
-}
+    /* ==================== Sidebar ==================== */
+    .sidebar {
+      width: 220px;
+      background: var(--bg-secondary);
+      border-right: 1px solid var(--border);
+      display: flex;
+      flex-direction: column;
+      position: fixed;
+      top: 0;
+      left: 0;
+      bottom: 0;
+      z-index: 100;
+    }
 
-.sidebar-header {
-  padding: 24px 20px;
-  border-bottom: 1px solid var(--border);
-}
+    .sidebar-header {
+      padding: 24px 20px;
+      border-bottom: 1px solid var(--border);
+    }
 
-.sidebar-header h1 {
-  font-size: 18px;
-  font-weight: 700;
-  background: linear-gradient(135deg, #a78bfa, #60a5fa);
-  -webkit-background-clip: text;
-  -webkit-text-fill-color: transparent;
-}
+    .sidebar-header h1 {
+      font-size: 18px;
+      font-weight: 700;
+      background: linear-gradient(135deg, #a78bfa, #60a5fa);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
 
-.sidebar-header p {
-  font-size: 11px;
-  color: var(--text-muted);
-  margin-top: 4px;
-}
+    .sidebar-header p {
+      font-size: 11px;
+      color: var(--text-muted);
+      margin-top: 4px;
+    }
 
-.nav-items {
-  padding: 12px 8px;
-  flex: 1;
-}
+    .nav-items {
+      padding: 12px 8px;
+      flex: 1;
+    }
 
-.nav-item {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 10px 14px;
-  border-radius: var(--radius-sm);
-  cursor: pointer;
-  color: var(--text-secondary);
-  font-size: 14px;
-  font-weight: 500;
-  transition: var(--transition);
-  margin-bottom: 2px;
-}
+    .nav-item {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 10px 14px;
+      border-radius: var(--radius-sm);
+      cursor: pointer;
+      color: var(--text-secondary);
+      font-size: 14px;
+      font-weight: 500;
+      transition: var(--transition);
+      margin-bottom: 2px;
+    }
 
-.nav-item:hover { background: var(--bg-card); color: var(--text-primary); }
-.nav-item.active { background: rgba(139,92,246,0.15); color: var(--accent-purple); }
-.nav-item .icon { font-size: 18px; width: 24px; text-align: center; }
+    .nav-item:hover {
+      background: var(--bg-card);
+      color: var(--text-primary);
+    }
 
-/* ==================== Main ==================== */
-.main {
-  margin-left: 220px;
-  flex: 1;
-  padding: 28px 32px;
-  min-height: 100vh;
-}
+    .nav-item.active {
+      background: rgba(139, 92, 246, 0.15);
+      color: var(--accent-purple);
+    }
 
-.page { display: none; }
-.page.active { display: block; }
+    .nav-item .icon {
+      font-size: 18px;
+      width: 24px;
+      text-align: center;
+    }
 
-.page-title {
-  font-size: 22px;
-  font-weight: 700;
-  margin-bottom: 24px;
-}
+    /* ==================== Main ==================== */
+    .main {
+      margin-left: 220px;
+      flex: 1;
+      padding: 28px 32px;
+      min-height: 100vh;
+    }
 
-/* ==================== Stats Cards ==================== */
-.stats-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
-  gap: 16px;
-  margin-bottom: 28px;
-}
+    .page {
+      display: none;
+    }
 
-.stat-card {
-  padding: 20px;
-  border-radius: var(--radius);
-  color: white;
-  position: relative;
-  overflow: hidden;
-}
-.stat-card::after {
-  content: '';
-  position: absolute;
-  top: -20px; right: -20px;
-  width: 80px; height: 80px;
-  border-radius: 50%;
-  background: rgba(255,255,255,0.08);
-}
-.stat-card .label {
-  font-size: 12px;
-  opacity: 0.85;
-  margin-bottom: 8px;
-  font-weight: 500;
-}
-.stat-card .value {
-  font-size: 28px;
-  font-weight: 700;
-}
-.stat-card:nth-child(1) { background: var(--gradient-purple); }
-.stat-card:nth-child(2) { background: var(--gradient-blue); }
-.stat-card:nth-child(3) { background: var(--gradient-teal); }
-.stat-card:nth-child(4) { background: var(--gradient-pink); }
-.stat-card:nth-child(5) { background: var(--gradient-amber); }
-.stat-card:nth-child(6) { background: var(--gradient-green); }
+    .page.active {
+      display: block;
+    }
 
-/* ==================== Section Card ==================== */
-.section-card {
-  background: var(--bg-card);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  padding: 20px;
-  margin-bottom: 20px;
-}
-.section-card h3 {
-  font-size: 15px;
-  font-weight: 600;
-  margin-bottom: 16px;
-  color: var(--text-primary);
-}
+    .page-title {
+      font-size: 22px;
+      font-weight: 700;
+      margin-bottom: 24px;
+    }
 
-/* ==================== Split Layout ==================== */
-.split-layout {
-  display: flex;
-  gap: 20px;
-  height: calc(100vh - 120px);
-}
-.split-left {
-  width: 260px;
-  flex-shrink: 0;
-  background: var(--bg-card);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  overflow-y: auto;
-}
-.split-right {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  gap: 16px;
-  overflow-y: auto;
-}
+    /* ==================== Stats Cards ==================== */
+    .stats-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+      gap: 16px;
+      margin-bottom: 28px;
+    }
 
-/* ==================== List Items ==================== */
-.list-item {
-  padding: 12px 16px;
-  border-bottom: 1px solid var(--border);
-  cursor: pointer;
-  transition: var(--transition);
-}
-.list-item:hover { background: var(--bg-card-hover); }
-.list-item.active { background: rgba(139,92,246,0.1); border-left: 3px solid var(--accent-purple); }
-.list-item .item-title {
-  font-size: 14px;
-  font-weight: 500;
-  color: var(--text-primary);
-  margin-bottom: 4px;
-}
-.list-item .item-meta {
-  font-size: 12px;
-  color: var(--text-muted);
-}
+    .stat-card {
+      padding: 20px;
+      border-radius: var(--radius);
+      color: white;
+      position: relative;
+      overflow: hidden;
+    }
 
-/* ==================== Messages ==================== */
-.message-list {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-.msg {
-  padding: 10px 14px;
-  border-radius: var(--radius-sm);
-  max-width: 85%;
-  font-size: 14px;
-  line-height: 1.6;
-  word-break: break-word;
-}
-.msg.user {
-  background: rgba(59,130,246,0.15);
-  border: 1px solid rgba(59,130,246,0.2);
-  align-self: flex-end;
-}
-.msg.assistant {
-  background: rgba(139,92,246,0.12);
-  border: 1px solid rgba(139,92,246,0.2);
-  align-self: flex-start;
-}
-.msg.tool {
-  background: rgba(20,184,166,0.1);
-  border: 1px solid rgba(20,184,166,0.2);
-  align-self: flex-start;
-  font-family: 'Consolas', 'Fira Code', monospace;
-  font-size: 12px;
-}
-.msg .msg-role {
-  font-size: 11px;
-  font-weight: 600;
-  text-transform: uppercase;
-  margin-bottom: 4px;
-  opacity: 0.7;
-}
-.msg .msg-time {
-  font-size: 11px;
-  color: var(--text-muted);
-  margin-top: 4px;
-}
+    .stat-card::after {
+      content: '';
+      position: absolute;
+      top: -20px;
+      right: -20px;
+      width: 80px;
+      height: 80px;
+      border-radius: 50%;
+      background: rgba(255, 255, 255, 0.08);
+    }
 
-/* ==================== Topics ==================== */
-.topic-card {
-  background: var(--bg-card);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  padding: 16px;
-  margin-bottom: 12px;
-  cursor: pointer;
-  transition: var(--transition);
-}
-.topic-card:hover { border-color: var(--accent-purple); }
-.topic-card .topic-title {
-  font-size: 14px;
-  font-weight: 600;
-  margin-bottom: 6px;
-}
-.topic-card .topic-meta {
-  font-size: 12px;
-  color: var(--text-muted);
-}
-.topic-card .topic-summary {
-  font-size: 13px;
-  color: var(--text-secondary);
-  margin-top: 10px;
-  line-height: 1.6;
-  white-space: pre-wrap;
-  display: none;
-}
-.topic-card.expanded .topic-summary { display: block; }
+    .stat-card .label {
+      font-size: 12px;
+      opacity: 0.85;
+      margin-bottom: 8px;
+      font-weight: 500;
+    }
 
-/* ==================== Config Editor ==================== */
-.config-textarea {
-  width: 100%;
-  min-height: 500px;
-  background: var(--bg-input);
-  color: var(--text-primary);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  padding: 16px;
-  font-family: 'Consolas', 'Fira Code', monospace;
-  font-size: 13px;
-  line-height: 1.7;
-  resize: vertical;
-  outline: none;
-  tab-size: 4;
-}
-.config-textarea:focus { border-color: var(--accent-purple); }
+    .stat-card .value {
+      font-size: 28px;
+      font-weight: 700;
+    }
 
-.btn {
-  padding: 8px 20px;
-  border-radius: var(--radius-sm);
-  border: none;
-  font-size: 13px;
-  font-weight: 600;
-  cursor: pointer;
-  transition: var(--transition);
-}
-.btn-primary {
-  background: var(--gradient-purple);
-  color: white;
-}
-.btn-primary:hover { opacity: 0.9; transform: translateY(-1px); }
-.btn-secondary {
-  background: var(--bg-card);
-  color: var(--text-secondary);
-  border: 1px solid var(--border);
-}
-.btn-secondary:hover { color: var(--text-primary); border-color: var(--text-muted); }
+    .stat-card:nth-child(1) {
+      background: var(--gradient-purple);
+    }
 
-.save-bar {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: 12px;
-}
-.save-status {
-  font-size: 13px;
-  color: var(--accent-green);
-  opacity: 0;
-  transition: var(--transition);
-}
-.save-status.show { opacity: 1; }
+    .stat-card:nth-child(2) {
+      background: var(--gradient-blue);
+    }
 
-/* ==================== Log Viewer ==================== */
-.log-content {
-  background: var(--bg-input);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  padding: 16px;
-  font-family: 'Consolas', 'Fira Code', monospace;
-  font-size: 12px;
-  line-height: 1.6;
-  color: var(--text-secondary);
-  overflow-y: auto;
-  max-height: calc(100vh - 200px);
-  white-space: pre;
-  word-break: break-all;
-}
+    .stat-card:nth-child(3) {
+      background: var(--gradient-teal);
+    }
 
-/* ==================== Consciousness Log ==================== */
-.clog-item {
-  padding: 12px 0;
-  border-bottom: 1px solid var(--border);
-}
-.clog-item:last-child { border-bottom: none; }
-.clog-time {
-  font-size: 12px;
-  color: var(--accent-purple);
-  font-weight: 500;
-  margin-bottom: 4px;
-}
-.clog-summary {
-  font-size: 13px;
-  color: var(--text-secondary);
-  line-height: 1.6;
-}
-.clog-targets {
-  font-size: 11px;
-  color: var(--text-muted);
-  margin-top: 4px;
-}
+    .stat-card:nth-child(4) {
+      background: var(--gradient-pink);
+    }
 
-/* ==================== Empty State ==================== */
-.empty-state {
-  text-align: center;
-  padding: 60px 20px;
-  color: var(--text-muted);
-  font-size: 14px;
-}
-.empty-state .icon { font-size: 40px; margin-bottom: 12px; }
+    .stat-card:nth-child(5) {
+      background: var(--gradient-amber);
+    }
 
-/* ==================== Loading ==================== */
-.loading {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 40px;
-  color: var(--text-muted);
-}
-.spinner {
-  width: 20px; height: 20px;
-  border: 2px solid var(--border);
-  border-top-color: var(--accent-purple);
-  border-radius: 50%;
-  animation: spin 0.8s linear infinite;
-  margin-right: 10px;
-}
-@keyframes spin { to { transform: rotate(360deg); } }
+    .stat-card:nth-child(6) {
+      background: var(--gradient-green);
+    }
 
-/* ==================== Scrollbar ==================== */
-::-webkit-scrollbar { width: 6px; }
-::-webkit-scrollbar-track { background: transparent; }
-::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
-::-webkit-scrollbar-thumb:hover { background: var(--text-muted); }
-</style>
+    /* ==================== Section Card ==================== */
+    .section-card {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 20px;
+      margin-bottom: 20px;
+    }
+
+    .section-card h3 {
+      font-size: 15px;
+      font-weight: 600;
+      margin-bottom: 16px;
+      color: var(--text-primary);
+    }
+
+    /* ==================== Split Layout ==================== */
+    .split-layout {
+      display: flex;
+      gap: 20px;
+      height: calc(100vh - 120px);
+    }
+
+    .split-left {
+      width: 260px;
+      flex-shrink: 0;
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      overflow-y: auto;
+    }
+
+    .split-right {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+      overflow-y: auto;
+    }
+
+    /* ==================== List Items ==================== */
+    .list-item {
+      padding: 12px 16px;
+      border-bottom: 1px solid var(--border);
+      cursor: pointer;
+      transition: var(--transition);
+    }
+
+    .list-item:hover {
+      background: var(--bg-card-hover);
+    }
+
+    .list-item.active {
+      background: rgba(139, 92, 246, 0.1);
+      border-left: 3px solid var(--accent-purple);
+    }
+
+    .list-item .item-title {
+      font-size: 14px;
+      font-weight: 500;
+      color: var(--text-primary);
+      margin-bottom: 4px;
+    }
+
+    .list-item .item-meta {
+      font-size: 12px;
+      color: var(--text-muted);
+    }
+
+    /* ==================== Messages ==================== */
+    .message-list {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .msg {
+      padding: 10px 14px;
+      border-radius: var(--radius-sm);
+      max-width: 85%;
+      font-size: 14px;
+      line-height: 1.6;
+      word-break: break-word;
+    }
+
+    .msg.user {
+      background: rgba(59, 130, 246, 0.15);
+      border: 1px solid rgba(59, 130, 246, 0.2);
+      align-self: flex-end;
+    }
+
+    .msg.assistant {
+      background: rgba(139, 92, 246, 0.12);
+      border: 1px solid rgba(139, 92, 246, 0.2);
+      align-self: flex-start;
+    }
+
+    .msg.tool {
+      background: rgba(20, 184, 166, 0.1);
+      border: 1px solid rgba(20, 184, 166, 0.2);
+      align-self: flex-start;
+      font-family: 'Consolas', 'Fira Code', monospace;
+      font-size: 12px;
+    }
+
+    .msg .msg-role {
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+      margin-bottom: 4px;
+      opacity: 0.7;
+    }
+
+    .msg .msg-time {
+      font-size: 11px;
+      color: var(--text-muted);
+      margin-top: 4px;
+    }
+
+    /* ==================== Topics ==================== */
+    .topic-card {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 16px;
+      margin-bottom: 12px;
+      cursor: pointer;
+      transition: var(--transition);
+    }
+
+    .topic-card:hover {
+      border-color: var(--accent-purple);
+    }
+
+    .topic-card .topic-title {
+      font-size: 14px;
+      font-weight: 600;
+      margin-bottom: 6px;
+    }
+
+    .topic-card .topic-meta {
+      font-size: 12px;
+      color: var(--text-muted);
+    }
+
+    .topic-card .topic-summary {
+      font-size: 13px;
+      color: var(--text-secondary);
+      margin-top: 10px;
+      line-height: 1.6;
+      white-space: pre-wrap;
+      display: none;
+    }
+
+    .topic-card.expanded .topic-summary {
+      display: block;
+    }
+
+    /* ==================== Config Editor ==================== */
+    .config-textarea {
+      width: 100%;
+      min-height: 500px;
+      background: var(--bg-input);
+      color: var(--text-primary);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      padding: 16px;
+      font-family: 'Consolas', 'Fira Code', monospace;
+      font-size: 13px;
+      line-height: 1.7;
+      resize: vertical;
+      outline: none;
+      tab-size: 4;
+    }
+
+    .config-textarea:focus {
+      border-color: var(--accent-purple);
+    }
+
+    .btn {
+      padding: 8px 20px;
+      border-radius: var(--radius-sm);
+      border: none;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: var(--transition);
+    }
+
+    .btn-primary {
+      background: var(--gradient-purple);
+      color: white;
+    }
+
+    .btn-primary:hover {
+      opacity: 0.9;
+      transform: translateY(-1px);
+    }
+
+    .btn-secondary {
+      background: var(--bg-card);
+      color: var(--text-secondary);
+      border: 1px solid var(--border);
+    }
+
+    .btn-secondary:hover {
+      color: var(--text-primary);
+      border-color: var(--text-muted);
+    }
+
+    .save-bar {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 12px;
+    }
+
+    .save-status {
+      font-size: 13px;
+      color: var(--accent-green);
+      opacity: 0;
+      transition: var(--transition);
+    }
+
+    .save-status.show {
+      opacity: 1;
+    }
+
+    /* ==================== Log Viewer ==================== */
+    .log-content {
+      background: var(--bg-input);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      padding: 16px;
+      font-family: 'Consolas', 'Fira Code', monospace;
+      font-size: 12px;
+      line-height: 1.6;
+      color: var(--text-secondary);
+      overflow-y: auto;
+      max-height: calc(100vh - 200px);
+      white-space: pre;
+      word-break: break-all;
+    }
+
+    /* ==================== Consciousness Log ==================== */
+    .clog-item {
+      padding: 12px 0;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .clog-item:last-child {
+      border-bottom: none;
+    }
+
+    .clog-time {
+      font-size: 12px;
+      color: var(--accent-purple);
+      font-weight: 500;
+      margin-bottom: 4px;
+    }
+
+    .clog-summary {
+      font-size: 13px;
+      color: var(--text-secondary);
+      line-height: 1.6;
+    }
+
+    .clog-targets {
+      font-size: 11px;
+      color: var(--text-muted);
+      margin-top: 4px;
+    }
+
+    /* ==================== Timer / Schedule ==================== */
+    .timer-item {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 16px;
+      margin-bottom: 12px;
+      transition: var(--transition);
+    }
+
+    .timer-item:hover {
+      border-color: var(--accent-purple);
+    }
+
+    .timer-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      margin-bottom: 8px;
+    }
+
+    .timer-name {
+      font-size: 15px;
+      font-weight: 600;
+      color: var(--text-primary);
+    }
+
+    .timer-badges {
+      display: flex;
+      gap: 6px;
+    }
+
+    .badge {
+      padding: 2px 8px;
+      border-radius: 4px;
+      font-size: 11px;
+      font-weight: 600;
+    }
+
+    .badge-once {
+      background: rgba(59, 130, 246, 0.15);
+      color: var(--accent-blue);
+    }
+
+    .badge-repeat {
+      background: rgba(139, 92, 246, 0.15);
+      color: var(--accent-purple);
+    }
+
+    .timer-desc {
+      font-size: 13px;
+      color: var(--text-secondary);
+      line-height: 1.5;
+      margin-bottom: 10px;
+      word-break: break-word;
+    }
+
+    .timer-meta {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .timer-time {
+      font-size: 12px;
+      color: var(--text-muted);
+    }
+
+    .timer-actions {
+      display: flex;
+      gap: 8px;
+    }
+
+    .btn-sm {
+      padding: 5px 12px;
+      font-size: 12px;
+      border-radius: 6px;
+      border: none;
+      cursor: pointer;
+      font-weight: 600;
+      transition: var(--transition);
+    }
+
+    .btn-trigger {
+      background: var(--gradient-amber);
+      color: white;
+    }
+
+    .btn-trigger:hover {
+      opacity: 0.9;
+    }
+
+    .btn-danger {
+      background: rgba(239, 68, 68, 0.15);
+      color: #ef4444;
+      border: 1px solid rgba(239, 68, 68, 0.3);
+    }
+
+    .btn-danger:hover {
+      background: rgba(239, 68, 68, 0.25);
+    }
+
+    .btn-wake {
+      background: var(--gradient-purple);
+      color: white;
+      padding: 10px 24px;
+      font-size: 14px;
+      border-radius: var(--radius-sm);
+      border: none;
+      cursor: pointer;
+      font-weight: 600;
+      transition: var(--transition);
+    }
+
+    .btn-wake:hover {
+      opacity: 0.9;
+      transform: translateY(-1px);
+    }
+
+    .schedule-toolbar {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 20px;
+    }
+
+    /* ==================== Test Chat ==================== */
+    .chat-container {
+      display: flex;
+      flex-direction: column;
+      height: calc(100vh - 120px);
+    }
+
+    .chat-messages {
+      flex: 1;
+      overflow-y: auto;
+      padding: 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      background: var(--bg-input);
+      border: 1px solid var(--border);
+      border-radius: var(--radius) var(--radius) 0 0;
+    }
+
+    .chat-bubble {
+      max-width: 80%;
+      padding: 10px 14px;
+      border-radius: 12px;
+      font-size: 14px;
+      line-height: 1.6;
+      word-break: break-word;
+      white-space: pre-wrap;
+    }
+
+    .chat-bubble.user {
+      align-self: flex-end;
+      background: rgba(59, 130, 246, 0.2);
+      border: 1px solid rgba(59, 130, 246, 0.3);
+    }
+
+    .chat-bubble.assistant {
+      align-self: flex-start;
+      background: rgba(139, 92, 246, 0.15);
+      border: 1px solid rgba(139, 92, 246, 0.25);
+    }
+
+    .chat-bubble .bubble-role {
+      font-size: 11px;
+      font-weight: 600;
+      opacity: 0.6;
+      margin-bottom: 4px;
+    }
+
+    .chat-bubble img {
+      max-width: 300px;
+      max-height: 300px;
+      border-radius: 8px;
+      margin-top: 8px;
+      cursor: pointer;
+    }
+
+    .chat-bubble a.file-link {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      margin-top: 8px;
+      padding: 6px 12px;
+      background: rgba(20, 184, 166, 0.15);
+      border: 1px solid rgba(20, 184, 166, 0.3);
+      border-radius: 6px;
+      color: var(--accent-teal);
+      text-decoration: none;
+      font-size: 13px;
+    }
+
+    .chat-bubble a.file-link:hover {
+      background: rgba(20, 184, 166, 0.25);
+    }
+
+    .chat-input-area {
+      display: flex;
+      gap: 8px;
+      padding: 12px;
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-top: none;
+      border-radius: 0 0 var(--radius) var(--radius);
+      align-items: flex-end;
+    }
+
+    .chat-input-area textarea {
+      flex: 1;
+      background: var(--bg-input);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 10px 14px;
+      color: var(--text-primary);
+      font-family: inherit;
+      font-size: 14px;
+      resize: none;
+      outline: none;
+      min-height: 42px;
+      max-height: 120px;
+    }
+
+    .chat-input-area textarea:focus {
+      border-color: var(--accent-purple);
+    }
+
+    .chat-btn-group {
+      display: flex;
+      gap: 6px;
+    }
+
+    .btn-icon {
+      width: 38px;
+      height: 38px;
+      border-radius: 8px;
+      border: 1px solid var(--border);
+      background: var(--bg-input);
+      color: var(--text-secondary);
+      font-size: 18px;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: var(--transition);
+    }
+
+    .btn-icon:hover {
+      border-color: var(--accent-purple);
+      color: var(--text-primary);
+    }
+
+    .btn-send {
+      width: 38px;
+      height: 38px;
+      border-radius: 8px;
+      border: none;
+      background: var(--gradient-purple);
+      color: white;
+      font-size: 18px;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: var(--transition);
+    }
+
+    .btn-send:hover {
+      opacity: 0.9;
+    }
+
+    .btn-send:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+
+    .chat-attachment-preview {
+      padding: 8px 12px;
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-top: none;
+      border-bottom: none;
+      font-size: 12px;
+      color: var(--text-secondary);
+      display: none;
+    }
+
+    .chat-attachment-preview.show {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .chat-attachment-preview .remove-att {
+      color: var(--accent-pink);
+      cursor: pointer;
+      font-weight: 600;
+    }
+
+    .chat-typing {
+      align-self: flex-start;
+      padding: 8px 14px;
+      background: rgba(139, 92, 246, 0.1);
+      border-radius: 12px;
+      font-size: 13px;
+      color: var(--text-muted);
+      display: none;
+    }
+
+    .chat-typing.show {
+      display: block;
+    }
+
+    /* ==================== Empty State ==================== */
+    .empty-state {
+      text-align: center;
+      padding: 60px 20px;
+      color: var(--text-muted);
+      font-size: 14px;
+    }
+
+    .empty-state .icon {
+      font-size: 40px;
+      margin-bottom: 12px;
+    }
+
+    /* ==================== Loading ==================== */
+    .loading {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 40px;
+      color: var(--text-muted);
+    }
+
+    .spinner {
+      width: 20px;
+      height: 20px;
+      border: 2px solid var(--border);
+      border-top-color: var(--accent-purple);
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+      margin-right: 10px;
+    }
+
+    @keyframes spin {
+      to {
+        transform: rotate(360deg);
+      }
+    }
+
+    /* ==================== Scrollbar ==================== */
+    ::-webkit-scrollbar {
+      width: 6px;
+    }
+
+    ::-webkit-scrollbar-track {
+      background: transparent;
+    }
+
+    ::-webkit-scrollbar-thumb {
+      background: var(--border);
+      border-radius: 3px;
+    }
+
+    ::-webkit-scrollbar-thumb:hover {
+      background: var(--text-muted);
+    }
+  </style>
 </head>
+
 <body>
 
-<!-- Sidebar -->
-<div class="sidebar">
-  <div class="sidebar-header">
-    <h1>🌙 OpenKaguya</h1>
-    <p>管理面板</p>
-  </div>
-  <div class="nav-items">
-    <div class="nav-item active" data-page="dashboard">
-      <span class="icon">📊</span> 仪表盘
+  <!-- Sidebar -->
+  <div class="sidebar">
+    <div class="sidebar-header">
+      <h1>🌙 OpenKaguya</h1>
+      <p>管理面板</p>
     </div>
-    <div class="nav-item" data-page="messages">
-      <span class="icon">💬</span> 对话 & 记忆
-    </div>
-    <div class="nav-item" data-page="config">
-      <span class="icon">⚙️</span> 配置编辑
-    </div>
-    <div class="nav-item" data-page="logs">
-      <span class="icon">📋</span> 日志
-    </div>
-  </div>
-</div>
-
-<!-- Main Content -->
-<div class="main">
-
-  <!-- Dashboard -->
-  <div id="page-dashboard" class="page active">
-    <h2 class="page-title">仪表盘</h2>
-    <div class="stats-grid" id="stats-grid"></div>
-    <div class="section-card">
-      <h3>🧠 最近意识活动</h3>
-      <div id="consciousness-logs"></div>
-    </div>
-  </div>
-
-  <!-- Messages & Memory -->
-  <div id="page-messages" class="page">
-    <h2 class="page-title">对话 & 记忆</h2>
-    <div class="split-layout">
-      <div class="split-left" id="user-list"></div>
-      <div class="split-right">
-        <div class="section-card" style="flex:1;overflow-y:auto">
-          <h3>💬 消息记录</h3>
-          <div id="message-list" class="message-list">
-            <div class="empty-state"><div class="icon">👈</div>选择一个用户查看消息</div>
-          </div>
-        </div>
-        <div class="section-card" style="max-height:40%;">
-          <h3>📚 话题摘要</h3>
-          <div id="topic-list">
-            <div class="empty-state">选择用户后显示话题</div>
-          </div>
-        </div>
+    <div class="nav-items">
+      <div class="nav-item active" data-page="dashboard">
+        <span class="icon">📊</span> 仪表盘
+      </div>
+      <div class="nav-item" data-page="messages">
+        <span class="icon">💬</span> 对话 & 记忆
+      </div>
+      <div class="nav-item" data-page="config">
+        <span class="icon">⚙️</span> 配置编辑
+      </div>
+      <div class="nav-item" data-page="logs">
+        <span class="icon">📋</span> 日志
+      </div>
+      <div class="nav-item" data-page="schedules">
+        <span class="icon">⏰</span> 计划日程
+      </div>
+      <div class="nav-item" data-page="test-chat">
+        <span class="icon">🧪</span> 测试聊天
       </div>
     </div>
   </div>
 
-  <!-- Config -->
-  <div id="page-config" class="page">
-    <h2 class="page-title">配置编辑</h2>
-    <div class="split-layout">
-      <div class="split-left" id="config-file-list"></div>
-      <div class="split-right">
-        <div class="save-bar">
-          <span id="config-filename" style="font-weight:600;color:var(--text-secondary);">选择配置文件</span>
-          <div style="display:flex;gap:10px;align-items:center;">
-            <span id="save-status" class="save-status">✅ 已保存</span>
-            <button class="btn btn-primary" id="btn-save-config" onclick="saveConfig()">保存</button>
+  <!-- Main Content -->
+  <div class="main">
+
+    <!-- Dashboard -->
+    <div id="page-dashboard" class="page active">
+      <h2 class="page-title">仪表盘</h2>
+      <div class="stats-grid" id="stats-grid"></div>
+      <div class="section-card">
+        <h3>🧠 最近意识活动</h3>
+        <div id="consciousness-logs"></div>
+      </div>
+    </div>
+
+    <!-- Messages & Memory -->
+    <div id="page-messages" class="page">
+      <h2 class="page-title">对话 & 记忆</h2>
+      <div class="split-layout">
+        <div class="split-left" id="user-list"></div>
+        <div class="split-right">
+          <div class="section-card" style="flex:1;overflow-y:auto">
+            <h3>💬 消息记录</h3>
+            <div id="message-list" class="message-list">
+              <div class="empty-state">
+                <div class="icon">👈</div>选择一个用户查看消息
+              </div>
+            </div>
+          </div>
+          <div class="section-card" style="max-height:40%;">
+            <h3>📚 话题摘要</h3>
+            <div id="topic-list">
+              <div class="empty-state">选择用户后显示话题</div>
+            </div>
           </div>
         </div>
-        <textarea class="config-textarea" id="config-editor" placeholder="选择左侧文件进行编辑..."></textarea>
       </div>
     </div>
-  </div>
 
-  <!-- Logs -->
-  <div id="page-logs" class="page">
-    <h2 class="page-title">日志</h2>
-    <div class="split-layout">
-      <div class="split-left" id="log-file-list"></div>
-      <div class="split-right">
-        <div class="save-bar">
-          <span id="log-filename" style="font-weight:600;color:var(--text-secondary);">选择日志文件</span>
-          <button class="btn btn-secondary" onclick="refreshLog()">🔄 刷新</button>
+    <!-- Config -->
+    <div id="page-config" class="page">
+      <h2 class="page-title">配置编辑</h2>
+      <div class="split-layout">
+        <div class="split-left" id="config-file-list"></div>
+        <div class="split-right">
+          <div class="save-bar">
+            <span id="config-filename" style="font-weight:600;color:var(--text-secondary);">选择配置文件</span>
+            <div style="display:flex;gap:10px;align-items:center;">
+              <span id="save-status" class="save-status">✅ 已保存</span>
+              <button class="btn btn-primary" id="btn-save-config" onclick="saveConfig()">保存</button>
+            </div>
+          </div>
+          <textarea class="config-textarea" id="config-editor" placeholder="选择左侧文件进行编辑..."></textarea>
         </div>
-        <div class="log-content" id="log-content">选择左侧日志文件查看...</div>
       </div>
     </div>
+
+    <!-- Logs -->
+    <div id="page-logs" class="page">
+      <h2 class="page-title">日志</h2>
+      <div class="split-layout">
+        <div class="split-left" id="log-file-list"></div>
+        <div class="split-right">
+          <div class="save-bar">
+            <span id="log-filename" style="font-weight:600;color:var(--text-secondary);">选择日志文件</span>
+            <button class="btn btn-secondary" onclick="refreshLog()">🔄 刷新</button>
+          </div>
+          <div class="log-content" id="log-content">选择左侧日志文件查看...</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Schedules -->
+    <div id="page-schedules" class="page">
+      <h2 class="page-title">计划日程</h2>
+      <div class="schedule-toolbar">
+        <button class="btn btn-secondary" onclick="loadTimers()">🔄 刷新</button>
+        <button class="btn-wake" onclick="manualWake()">🌙 唤醒辉夜姬</button>
+      </div>
+      <div id="timer-list"></div>
+    </div>
+
+    <!-- Test Chat -->
+    <div id="page-test-chat" class="page">
+      <h2 class="page-title">🧪 测试聊天</h2>
+      <div class="chat-container">
+        <div class="chat-messages" id="chat-messages">
+          <div class="empty-state">
+            <div class="icon">💬</div>在下方输入消息开始测试
+          </div>
+        </div>
+        <div class="chat-attachment-preview" id="chat-att-preview">
+          <span id="chat-att-name"></span>
+          <span class="remove-att" onclick="clearChatAttachment()">✖</span>
+        </div>
+        <div class="chat-input-area">
+          <div class="chat-btn-group">
+            <button class="btn-icon" onclick="document.getElementById('chat-img-input').click()"
+              title="发送图片">🖼️</button>
+            <button class="btn-icon" onclick="document.getElementById('chat-file-input').click()"
+              title="发送文件">📎</button>
+            <input type="file" id="chat-img-input" accept="image/*" style="display:none"
+              onchange="onChatImageSelect(this)">
+            <input type="file" id="chat-file-input" style="display:none" onchange="onChatFileSelect(this)">
+          </div>
+          <textarea id="chat-input" placeholder="输入消息..." rows="1" onkeydown="chatKeyDown(event)"></textarea>
+          <button class="btn-send" id="btn-chat-send" onclick="sendChatMessage()">➤</button>
+        </div>
+      </div>
+    </div>
+
   </div>
 
-</div>
+  <script>
+    // ==================== State ====================
+    let currentPage = 'dashboard';
+    let currentUserId = '';
+    let currentConfigFile = '';
+    let currentLogFile = '';
+    let configData = {};
 
-<script>
-// ==================== State ====================
-let currentPage = 'dashboard';
-let currentUserId = '';
-let currentConfigFile = '';
-let currentLogFile = '';
-let configData = {};
+    // ==================== API ====================
+    async function api(path) {
+      const res = await fetch(path);
+      return res.json();
+    }
 
-// ==================== API ====================
-async function api(path) {
-  const res = await fetch(path);
-  return res.json();
-}
+    async function apiPut(path, body) {
+      const res = await fetch(path, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      return res.json();
+    }
 
-async function apiPut(path, body) {
-  const res = await fetch(path, {
-    method: 'PUT',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-  });
-  return res.json();
-}
+    async function apiPost(path) {
+      const res = await fetch(path, { method: 'POST' });
+      return res.json();
+    }
 
-// ==================== Navigation ====================
-document.querySelectorAll('.nav-item').forEach(item => {
-  item.addEventListener('click', () => {
-    document.querySelector('.nav-item.active')?.classList.remove('active');
-    item.classList.add('active');
-    const page = item.dataset.page;
-    document.querySelector('.page.active')?.classList.remove('active');
-    document.getElementById('page-' + page).classList.add('active');
-    currentPage = page;
-    if (page === 'dashboard') loadDashboard();
-    if (page === 'messages') loadUsers();
-    if (page === 'config') loadConfig();
-    if (page === 'logs') loadLogFiles();
-  });
-});
+    async function apiDelete(path) {
+      const res = await fetch(path, { method: 'DELETE' });
+      return res.json();
+    }
 
-// ==================== Dashboard ====================
-async function loadDashboard() {
-  const stats = await api('/api/stats');
-  const grid = document.getElementById('stats-grid');
-  const items = [
-    { label: '总消息', value: stats.total_messages, icon: '💬' },
-    { label: '话题数', value: stats.total_topics, icon: '📚' },
-    { label: '用户数', value: stats.total_users, icon: '👥' },
-    { label: '今日消息', value: stats.today_messages, icon: '📨' },
-    { label: '笔记', value: stats.total_notes, icon: '📝' },
-    { label: '活跃定时器', value: stats.active_timers, icon: '⏰' },
-  ];
-  grid.innerHTML = items.map(i => `
+    async function apiPostJson(path, body) {
+      const res = await fetch(path, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      return res.json();
+    }
+
+    // ==================== Navigation ====================
+    document.querySelectorAll('.nav-item').forEach(item => {
+      item.addEventListener('click', () => {
+        document.querySelector('.nav-item.active')?.classList.remove('active');
+        item.classList.add('active');
+        const page = item.dataset.page;
+        document.querySelector('.page.active')?.classList.remove('active');
+        document.getElementById('page-' + page).classList.add('active');
+        currentPage = page;
+        if (page === 'dashboard') loadDashboard();
+        if (page === 'messages') loadUsers();
+        if (page === 'config') loadConfig();
+        if (page === 'logs') loadLogFiles();
+        if (page === 'schedules') loadTimers();
+      });
+    });
+
+    // ==================== Dashboard ====================
+    async function loadDashboard() {
+      const stats = await api('/api/stats');
+      const grid = document.getElementById('stats-grid');
+      const items = [
+        { label: '总消息', value: stats.total_messages, icon: '💬' },
+        { label: '话题数', value: stats.total_topics, icon: '📚' },
+        { label: '用户数', value: stats.total_users, icon: '👥' },
+        { label: '今日消息', value: stats.today_messages, icon: '📨' },
+        { label: '笔记', value: stats.total_notes, icon: '📝' },
+        { label: '活跃定时器', value: stats.active_timers, icon: '⏰' },
+      ];
+      grid.innerHTML = items.map(i => `
     <div class="stat-card">
       <div class="label">${i.icon} ${i.label}</div>
       <div class="value">${i.value}</div>
     </div>
   `).join('');
 
-  // Consciousness logs
-  const logs = await api('/api/consciousness-logs?limit=10');
-  const el = document.getElementById('consciousness-logs');
-  if (!logs.length) {
-    el.innerHTML = '<div class="empty-state">暂无意识活动记录</div>';
-    return;
-  }
-  el.innerHTML = logs.map(l => `
+      // Consciousness logs
+      const logs = await api('/api/consciousness-logs?limit=10');
+      const el = document.getElementById('consciousness-logs');
+      if (!logs.length) {
+        el.innerHTML = '<div class="empty-state">暂无意识活动记录</div>';
+        return;
+      }
+      el.innerHTML = logs.map(l => `
     <div class="clog-item">
       <div class="clog-time">${l.created_at || ''}</div>
       <div class="clog-summary">${escHtml(l.summary)}</div>
       ${l.target_users ? `<div class="clog-targets">👤 ${escHtml(l.target_users)}</div>` : ''}
     </div>
   `).join('');
-}
+    }
 
-// ==================== Messages ====================
-async function loadUsers() {
-  const users = await api('/api/users');
-  const el = document.getElementById('user-list');
-  if (!users.length) {
-    el.innerHTML = '<div class="empty-state">暂无用户数据</div>';
-    return;
-  }
-  el.innerHTML = users.map(u => `
+    // ==================== Messages ====================
+    async function loadUsers() {
+      const users = await api('/api/users');
+      const el = document.getElementById('user-list');
+      if (!users.length) {
+        el.innerHTML = '<div class="empty-state">暂无用户数据</div>';
+        return;
+      }
+      el.innerHTML = users.map(u => `
     <div class="list-item ${u.user_id === currentUserId ? 'active' : ''}"
          onclick="selectUser('${escAttr(u.user_id)}')">
       <div class="item-title">👤 ${escHtml(u.user_id)}</div>
       <div class="item-meta">${u.platform} · ${u.msg_count} 条 · ${formatTime(u.last_active)}</div>
     </div>
   `).join('');
-}
+    }
 
-async function selectUser(userId) {
-  currentUserId = userId;
-  loadUsers(); // refresh active state
-  loadMessages(userId);
-  loadTopics(userId);
-}
+    async function selectUser(userId) {
+      currentUserId = userId;
+      loadUsers(); // refresh active state
+      loadMessages(userId);
+      loadTopics(userId);
+    }
 
-async function loadMessages(userId) {
-  const el = document.getElementById('message-list');
-  el.innerHTML = '<div class="loading"><div class="spinner"></div>加载中...</div>';
-  const msgs = await api(`/api/messages?user_id=${encodeURIComponent(userId)}&limit=100`);
-  if (!msgs.length) {
-    el.innerHTML = '<div class="empty-state">暂无消息</div>';
-    return;
-  }
-  // Reverse to show oldest first
-  msgs.reverse();
-  el.innerHTML = msgs.map(m => {
-    const display = m.display_content || m.content || '';
-    const roleClass = m.role === 'user' ? 'user' : (m.role === 'tool' ? 'tool' : 'assistant');
-    const roleLabel = m.role === 'user' ? '用户' : (m.role === 'tool' ? '工具' : '辉夜姬');
-    return `
+    async function loadMessages(userId) {
+      const el = document.getElementById('message-list');
+      el.innerHTML = '<div class="loading"><div class="spinner"></div>加载中...</div>';
+      const msgs = await api(`/api/messages?user_id=${encodeURIComponent(userId)}&limit=100`);
+      if (!msgs.length) {
+        el.innerHTML = '<div class="empty-state">暂无消息</div>';
+        return;
+      }
+      // Reverse to show oldest first
+      msgs.reverse();
+      el.innerHTML = msgs.map(m => {
+        const display = m.display_content || m.content || '';
+        const roleClass = m.role === 'user' ? 'user' : (m.role === 'tool' ? 'tool' : 'assistant');
+        const roleLabel = m.role === 'user' ? '用户' : (m.role === 'tool' ? '工具' : '辉夜姬');
+        return `
       <div class="msg ${roleClass}">
         <div class="msg-role">${roleLabel}</div>
         ${escHtml(display.substring(0, 500))}${display.length > 500 ? '...' : ''}
         <div class="msg-time">${formatTime(m.created_at)}</div>
       </div>
     `;
-  }).join('');
-  el.scrollTop = el.scrollHeight;
-}
+      }).join('');
+      el.scrollTop = el.scrollHeight;
+    }
 
-async function loadTopics(userId) {
-  const el = document.getElementById('topic-list');
-  const topics = await api(`/api/topics?user_id=${encodeURIComponent(userId)}`);
-  if (!topics.length) {
-    el.innerHTML = '<div class="empty-state">暂无话题</div>';
-    return;
-  }
-  el.innerHTML = topics.map(t => `
+    async function loadTopics(userId) {
+      const el = document.getElementById('topic-list');
+      const topics = await api(`/api/topics?user_id=${encodeURIComponent(userId)}`);
+      if (!topics.length) {
+        el.innerHTML = '<div class="empty-state">暂无话题</div>';
+        return;
+      }
+      el.innerHTML = topics.map(t => `
     <div class="topic-card" onclick="toggleTopic(this, '${escAttr(t.id)}')">
       <div class="topic-title">📖 ${escHtml(t.title)}</div>
       <div class="topic-meta">${t.message_count} 条消息 · ${formatTime(t.updated_at)}</div>
       <div class="topic-summary" id="topic-${t.id}">加载中...</div>
     </div>
   `).join('');
-}
+    }
 
-async function toggleTopic(el, topicId) {
-  el.classList.toggle('expanded');
-  const summaryEl = document.getElementById('topic-' + topicId);
-  if (el.classList.contains('expanded') && summaryEl.textContent === '加载中...') {
-    const topic = await api(`/api/topics/${topicId}`);
-    summaryEl.textContent = topic.summary || '(无摘要)';
-  }
-}
+    async function toggleTopic(el, topicId) {
+      el.classList.toggle('expanded');
+      const summaryEl = document.getElementById('topic-' + topicId);
+      if (el.classList.contains('expanded') && summaryEl.textContent === '加载中...') {
+        const topic = await api(`/api/topics/${topicId}`);
+        summaryEl.textContent = topic.summary || '(无摘要)';
+      }
+    }
 
-// ==================== Config ====================
-async function loadConfig() {
-  configData = await api('/api/config');
-  const el = document.getElementById('config-file-list');
-  const files = Object.keys(configData);
-  el.innerHTML = files.map(f => `
+    // ==================== Config ====================
+    async function loadConfig() {
+      configData = await api('/api/config');
+      const el = document.getElementById('config-file-list');
+      const files = Object.keys(configData);
+      el.innerHTML = files.map(f => `
     <div class="list-item ${f === currentConfigFile ? 'active' : ''}"
          onclick="selectConfigFile('${escAttr(f)}')">
       <div class="item-title">📄 ${f}</div>
     </div>
   `).join('');
-  if (!currentConfigFile && files.length) selectConfigFile(files[0]);
-}
-
-function selectConfigFile(filename) {
-  currentConfigFile = filename;
-  document.getElementById('config-filename').textContent = filename;
-  document.getElementById('config-editor').value = configData[filename] || '';
-  loadConfig(); // refresh active state
-}
-
-async function saveConfig() {
-  if (!currentConfigFile) return;
-  const content = document.getElementById('config-editor').value;
-  try {
-    const result = await apiPut(`/api/config/${currentConfigFile}`, { content });
-    const statusEl = document.getElementById('save-status');
-    if (result.ok) {
-      statusEl.textContent = '✅ 已保存';
-      statusEl.style.color = 'var(--accent-green)';
-    } else {
-      statusEl.textContent = '❌ ' + (result.error || '保存失败');
-      statusEl.style.color = 'var(--accent-pink)';
+      if (!currentConfigFile && files.length) selectConfigFile(files[0]);
     }
-    statusEl.classList.add('show');
-    setTimeout(() => statusEl.classList.remove('show'), 3000);
-  } catch (e) {
-    alert('保存失败: ' + e.message);
-  }
-}
 
-// ==================== Logs ====================
-async function loadLogFiles() {
-  const files = await api('/api/logs');
-  const el = document.getElementById('log-file-list');
-  if (!files.length) {
-    el.innerHTML = '<div class="empty-state">暂无日志文件</div>';
-    return;
-  }
-  el.innerHTML = files.map(f => `
+    function selectConfigFile(filename) {
+      currentConfigFile = filename;
+      document.getElementById('config-filename').textContent = filename;
+      document.getElementById('config-editor').value = configData[filename] || '';
+      loadConfig(); // refresh active state
+    }
+
+    async function saveConfig() {
+      if (!currentConfigFile) return;
+      const content = document.getElementById('config-editor').value;
+      try {
+        const result = await apiPut(`/api/config/${currentConfigFile}`, { content });
+        const statusEl = document.getElementById('save-status');
+        if (result.ok) {
+          statusEl.textContent = '✅ 已保存';
+          statusEl.style.color = 'var(--accent-green)';
+        } else {
+          statusEl.textContent = '❌ ' + (result.error || '保存失败');
+          statusEl.style.color = 'var(--accent-pink)';
+        }
+        statusEl.classList.add('show');
+        setTimeout(() => statusEl.classList.remove('show'), 3000);
+      } catch (e) {
+        alert('保存失败: ' + e.message);
+      }
+    }
+
+    // ==================== Logs ====================
+    async function loadLogFiles() {
+      const files = await api('/api/logs');
+      const el = document.getElementById('log-file-list');
+      if (!files.length) {
+        el.innerHTML = '<div class="empty-state">暂无日志文件</div>';
+        return;
+      }
+      el.innerHTML = files.map(f => `
     <div class="list-item ${f === currentLogFile ? 'active' : ''}"
          onclick="selectLogFile('${escAttr(f)}')">
       <div class="item-title">📋 ${f}</div>
     </div>
   `).join('');
-  if (!currentLogFile) selectLogFile(files[0]);
-}
+      if (!currentLogFile) selectLogFile(files[0]);
+    }
 
-async function selectLogFile(filename) {
-  currentLogFile = filename;
-  document.getElementById('log-filename').textContent = filename;
-  loadLogFiles(); // refresh active state
-  await refreshLog();
-}
+    async function selectLogFile(filename) {
+      currentLogFile = filename;
+      document.getElementById('log-filename').textContent = filename;
+      loadLogFiles(); // refresh active state
+      await refreshLog();
+    }
 
-async function refreshLog() {
-  if (!currentLogFile) return;
-  const el = document.getElementById('log-content');
-  el.textContent = '加载中...';
-  const data = await api(`/api/logs/${currentLogFile}?lines=500`);
-  if (data.error) {
-    el.textContent = '错误: ' + data.error;
-    return;
-  }
-  el.textContent = data.lines.join('\n');
-  el.scrollTop = el.scrollHeight;
-}
+    async function refreshLog() {
+      if (!currentLogFile) return;
+      const el = document.getElementById('log-content');
+      el.textContent = '加载中...';
+      const data = await api(`/api/logs/${currentLogFile}?lines=500`);
+      if (data.error) {
+        el.textContent = '错误: ' + data.error;
+        return;
+      }
+      el.textContent = data.lines.join('\n');
+      el.scrollTop = el.scrollHeight;
+    }
 
-// ==================== Helpers ====================
-function escHtml(s) {
-  if (!s) return '';
-  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-}
-function escAttr(s) {
-  return s.replace(/'/g, "\\'").replace(/"/g, '&quot;');
-}
-function formatTime(ts) {
-  if (!ts) return '';
-  try {
-    const d = new Date(ts.replace(' ', 'T') + (ts.includes('+') ? '' : 'Z'));
-    return d.toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
-  } catch { return ts; }
-}
+    // ==================== Helpers ====================
+    function escHtml(s) {
+      if (!s) return '';
+      return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    }
+    function escAttr(s) {
+      return s.replace(/'/g, "\\'").replace(/"/g, '&quot;');
+    }
+    function formatTime(ts) {
+      if (!ts) return '';
+      try {
+        const d = new Date(ts.replace(' ', 'T') + (ts.includes('+') ? '' : 'Z'));
+        return d.toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
+      } catch { return ts; }
+    }
 
-// ==================== Init ====================
-loadDashboard();
-</script>
+    // ==================== Init ====================
+    loadDashboard();
+
+    // ==================== Schedules ====================
+    const REPEAT_LABELS = {
+      'none': '一次性',
+      'daily': '每天',
+      'weekdays': '工作日',
+      'weekly': '每周',
+      'monthly': '每月',
+    };
+
+    async function loadTimers() {
+      const el = document.getElementById('timer-list');
+      el.innerHTML = '<div class="loading"><div class="spinner"></div>加载中...</div>';
+      const timers = await api('/api/timers');
+      if (!timers.length) {
+        el.innerHTML = '<div class="empty-state"><div class="icon">📭</div>暂无计划日程</div>';
+        return;
+      }
+      el.innerHTML = timers.map(t => {
+        const repeat = t.cron || 'none';
+        const isRecurring = t.recurring;
+        const repeatLabel = REPEAT_LABELS[repeat] || `每${repeat}`;
+        const badgeClass = isRecurring ? 'badge-repeat' : 'badge-once';
+        const badgeText = isRecurring ? `🔁 ${repeatLabel}` : '⏱ 一次性';
+        // 截断描述
+        const desc = (t.action || '').substring(0, 200);
+        return `
+      <div class="timer-item">
+        <div class="timer-header">
+          <div class="timer-name">📌 ${escHtml(t.name)}</div>
+          <div class="timer-badges">
+            <span class="badge ${badgeClass}">${badgeText}</span>
+          </div>
+        </div>
+        <div class="timer-desc">${escHtml(desc)}</div>
+        <div class="timer-meta">
+          <div class="timer-time">⏰ 下次执行: ${t.trigger_at || '未设定'}</div>
+          <div class="timer-actions">
+            <button class="btn-sm btn-trigger" onclick="triggerTimer(${t.id}, '${escAttr(t.name)}')">
+              ⚡ 立即触发
+            </button>
+            <button class="btn-sm btn-danger" onclick="deleteTimer(${t.id}, '${escAttr(t.name)}')">
+              🗑 删除
+            </button>
+          </div>
+        </div>
+      </div>
+    `;
+      }).join('');
+    }
+
+    async function triggerTimer(id, name) {
+      if (!confirm(`确定要立即触发任务「${name}」吗？`)) return;
+      const res = await apiPost(`/api/timers/${id}/trigger`);
+      if (res.ok) {
+        alert(`✅ ${res.message}`);
+        loadTimers();
+      } else {
+        alert(`❌ ${res.error || '触发失败'}`);
+      }
+    }
+
+    async function deleteTimer(id, name) {
+      if (!confirm(`确定要删除任务「${name}」吗？此操作不可撤销。`)) return;
+      const res = await apiDelete(`/api/timers/${id}`);
+      if (res.ok) {
+        loadTimers();
+      } else {
+        alert(`❌ ${res.error || '删除失败'}`);
+      }
+    }
+
+    async function manualWake() {
+      if (!confirm('确定要手动唤醒辉夜姬吗？')) return;
+      const res = await apiPost('/api/wake');
+      if (res.ok) {
+        alert('🌙 ' + res.message);
+      } else {
+        alert('❌ ' + (res.error || '唤醒失败'));
+      }
+    }
+
+    // ==================== Test Chat ====================
+    let chatAttachment = null; // {type: 'image'|'file', base64, filename}
+    let chatHistory = []; // [{role, content, image_url?, file_url?, file_name?}]
+    let chatSending = false;
+
+    function renderChat() {
+      const el = document.getElementById('chat-messages');
+      if (!chatHistory.length) {
+        el.innerHTML = '<div class="empty-state"><div class="icon">💬</div>在下方输入消息开始测试</div>';
+        return;
+      }
+      el.innerHTML = chatHistory.map(m => {
+        const cls = m.role === 'user' ? 'user' : 'assistant';
+        const label = m.role === 'user' ? '你' : '辉夜姬';
+        let extra = '';
+        if (m.image_url) {
+          extra += `<img src="${m.image_url}" onclick="window.open(this.src)" alt="图片">`;
+        }
+        if (m.file_url) {
+          extra += `<a class="file-link" href="${m.file_url}" target="_blank">📄 ${escHtml(m.file_name || '下载文件')}</a>`;
+        }
+        return `
+          <div class="chat-bubble ${cls}">
+            <div class="bubble-role">${label}</div>
+            ${escHtml(m.content || '')}${extra}
+          </div>
+        `;
+      }).join('');
+      el.scrollTop = el.scrollHeight;
+    }
+
+    function addChatTyping() {
+      const el = document.getElementById('chat-messages');
+      const typing = document.createElement('div');
+      typing.className = 'chat-bubble assistant';
+      typing.id = 'chat-typing';
+      typing.innerHTML = '<div class="bubble-role">辉夜姬</div>✨ 思考中...';
+      el.appendChild(typing);
+      el.scrollTop = el.scrollHeight;
+    }
+
+    function removeChatTyping() {
+      const t = document.getElementById('chat-typing');
+      if (t) t.remove();
+    }
+
+    async function sendChatMessage() {
+      if (chatSending) return;
+      const input = document.getElementById('chat-input');
+      const content = input.value.trim();
+      if (!content && !chatAttachment) return;
+
+      chatSending = true;
+      document.getElementById('btn-chat-send').disabled = true;
+
+      // Show user message
+      const userMsg = { role: 'user', content };
+      if (chatAttachment?.type === 'image') {
+        userMsg.content = content || '[发送了图片]';
+      } else if (chatAttachment?.type === 'file') {
+        userMsg.content = content || `[发送了文件: ${chatAttachment.filename}]`;
+      }
+      chatHistory.push(userMsg);
+      renderChat();
+      input.value = '';
+
+      // Build request body
+      const body = { content };
+      if (chatAttachment?.type === 'image') {
+        body.image_base64 = chatAttachment.base64;
+      } else if (chatAttachment?.type === 'file') {
+        body.file_base64 = chatAttachment.base64;
+        body.filename = chatAttachment.filename;
+      }
+      clearChatAttachment();
+
+      addChatTyping();
+
+      try {
+        const res = await apiPostJson('/api/test/send', body);
+        removeChatTyping();
+
+        if (res.error) {
+          chatHistory.push({ role: 'assistant', content: `❌ 错误: ${res.error}` });
+        } else if (res.responses?.length) {
+          for (const r of res.responses) {
+            chatHistory.push({
+              role: 'assistant',
+              content: r.text || '',
+              image_url: r.image_url,
+              file_url: r.file_url,
+              file_name: r.file_name,
+            });
+          }
+        } else {
+          chatHistory.push({ role: 'assistant', content: '(无回复)' });
+        }
+      } catch (e) {
+        removeChatTyping();
+        chatHistory.push({ role: 'assistant', content: `❌ 网络错误: ${e.message}` });
+      }
+
+      renderChat();
+      chatSending = false;
+      document.getElementById('btn-chat-send').disabled = false;
+      input.focus();
+    }
+
+    function fileToBase64(file) {
+      return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => {
+          // Strip data:...;base64, prefix
+          const b64 = reader.result.split(',')[1];
+          resolve(b64);
+        };
+        reader.onerror = reject;
+        reader.readAsDataURL(file);
+      });
+    }
+
+    async function onChatImageSelect(input) {
+      const file = input.files[0];
+      if (!file) return;
+      const base64 = await fileToBase64(file);
+      chatAttachment = { type: 'image', base64, filename: file.name };
+      showAttachmentPreview(`🖼️ ${file.name}`);
+      input.value = '';
+    }
+
+    async function onChatFileSelect(input) {
+      const file = input.files[0];
+      if (!file) return;
+      const base64 = await fileToBase64(file);
+      chatAttachment = { type: 'file', base64, filename: file.name };
+      showAttachmentPreview(`📎 ${file.name}`);
+      input.value = '';
+    }
+
+    function showAttachmentPreview(text) {
+      const el = document.getElementById('chat-att-preview');
+      document.getElementById('chat-att-name').textContent = text;
+      el.classList.add('show');
+    }
+
+    function clearChatAttachment() {
+      chatAttachment = null;
+      const el = document.getElementById('chat-att-preview');
+      el.classList.remove('show');
+    }
+
+    function chatKeyDown(e) {
+      // Enter sends, Shift+Enter for newline
+      if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        sendChatMessage();
+      }
+    }
+  </script>
 </body>
+
 </html>
