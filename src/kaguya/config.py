@@ -1,358 +1,338 @@
-"""
-配置加载系统：从 TOML 文件加载项目配置。
+"""V2 配置系统 — 基于 TOML + dataclasses。
+
+加载顺序（后者覆盖前者）：
+  1. config/default.toml     — 基础默认值
+  2. config/secrets.toml     — API Key（不入 git）
+  3. config/persona.toml     — 人格设定
+  4. data/user_mixin.toml    — 用户运行时配置（管理界面写入）
 """
 
 from __future__ import annotations
 
-import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
-from loguru import logger
-
-if sys.version_info >= (3, 11):
+try:
     import tomllib
-else:
-    import tomli as tomllib
+except ImportError:
+    import tomli as tomllib  # type: ignore
+
+import tomli_w
 
 
-# 项目根目录（从 src/kaguya/config.py 往上三层）
-PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
-CONFIG_DIR = PROJECT_ROOT / "config"
-DATA_DIR = PROJECT_ROOT / "data"
+# ---------------------------------------------------------------------------
+# 子配置块
+# ---------------------------------------------------------------------------
 
 
 @dataclass
 class LLMModelConfig:
-    """单个 LLM 模型的配置"""
-
-    provider: str = "openai"
-    base_url: str = "https://api.openai.com/v1"
-    model: str = "gpt-4o"
+    base_url: str = ""
+    model: str = ""
     api_key: str = ""
     temperature: float = 0.7
-    max_tokens: int = 4096
-    dimensions: Optional[int] = None  # Embedding 模型专用
-    reasoning_effort: Optional[str] = None  # "none" / "low" / "medium" / "high", None=模型默认
+    max_tokens: int = 8192
 
 
 @dataclass
 class LLMConfig:
-    """LLM 配置（主模型 + 次级模型 + Embedding）"""
-
     primary: LLMModelConfig = field(default_factory=LLMModelConfig)
-    secondary: LLMModelConfig = field(default_factory=lambda: LLMModelConfig(
-        model="gpt-4o-mini", temperature=0.3, max_tokens=2048
-    ))
-    embedding: LLMModelConfig = field(default_factory=lambda: LLMModelConfig(
-        model="text-embedding-3-small", dimensions=1024
-    ))
+    summarizer: LLMModelConfig = field(default_factory=LLMModelConfig)
+
+
+@dataclass
+class PhoneConfig:
+    adb_path: str = "adb"
+    device_serial: str = ""
+    screenshot_scale: float = 0.5
 
 
 @dataclass
 class MemoryConfig:
-    """记忆系统配置"""
-
-    short_term_limit: int = 10
-    vectorize_threshold: int = 10
-    log_hours: int = 24
-    retrieval_top_k: int = 5
+    working_memory_size: int = 50
+    l1_max: int = 100
+    l1_summarize_batch: int = 20
+    l2_max: int = 50
+    l2_summarize_batch: int = 10
+    l3_max_tokens: int = 2000
+    inject_l1_count: int = 10
+    inject_l2_count: int = 5
 
 
 @dataclass
 class ConsciousnessConfig:
-    """主动意识配置"""
-
     enabled: bool = True
-    heartbeat_interval_minutes: int = 30
-    jitter_seconds: int = 300
-    quiet_hours_start: str = "23:00"
-    quiet_hours_end: str = "08:00"
+    interval_minutes: int = 30
+    jitter_minutes: int = 10
+    quiet_hours: list[str] = field(default_factory=lambda: ["23:00", "07:00"])
 
 
 @dataclass
-class BrowserConfig:
-    """浏览器配置"""
+class NotificationFilter:
+    """通知过滤规则。pattern 为正则表达式，匹配 title 或 text。"""
+    pattern: str = ""
+    target: str = "any"  # "title" / "text" / "any"
 
-    mode: str = "local"  # local / cloud / cdp
-    chrome_path: str = ""
-    cloud_proxy_country: str = "us"
-    cdp_url: str = ""
-    headless: bool = True
-    api_key: str = ""  # Browser-Use Cloud API Key
+
+@dataclass
+class NotificationsConfig:
+    poll_interval_seconds: int = 30
+    watch_apps: list[str] = field(default_factory=list)
+    ignore_apps: list[str] = field(default_factory=list)
+    filters: list[NotificationFilter] = field(default_factory=list)
 
 
 @dataclass
 class AdminConfig:
-    """管理面板配置"""
-
     enabled: bool = True
     host: str = "127.0.0.1"
     port: int = 8080
-    password: str = ""  # 管理面板密码（明文，从 secrets.toml 读取）
+    password: str = ""
 
 
 @dataclass
 class PersonaConfig:
-    """人格配置"""
-
     name: str = "辉夜姬"
-    age: int = 16
-    origin: str = "月球"
+    description: str = ""
     personality: str = ""
-    tone: str = ""
-    emoji_frequency: str = "moderate"
-    speech_examples: list[str] = field(default_factory=list)
-    likes: list[str] = field(default_factory=list)
-    dislikes: list[str] = field(default_factory=list)
-    refuse_topics: list[str] = field(default_factory=list)
-    max_messages_per_proactive_wake: int = 2
+    speaking_style: str = ""
+    interests: list[str] = field(default_factory=list)
+    guidelines_default: str = ""
+    guidelines_chat: str = ""
+    guidelines_notification: str = ""
+    guidelines_heartbeat: str = ""
+
+    def get_guidelines(self, kind: str) -> str:
+        """获取拼接了 default 前缀的 guidelines。kind: chat/notification/heartbeat。"""
+        specific = getattr(self, f"guidelines_{kind}", "").strip()
+        default = self.guidelines_default.strip()
+        parts = [p for p in (default, specific) if p]
+        return "\n".join(parts)
 
 
 @dataclass
-class WeChatConfig:
-    """微信 Adapter 配置"""
-
+class ImageConfig:
     enabled: bool = False
-    base_url: str = "http://127.0.0.1:8099"
+    model_generate: str = "wanx2.1-t2i-turbo"
+    model_edit: str = "wanx2.1-imageedit"
+    base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
     api_key: str = ""
-    whitelist_users: list[str] = field(default_factory=list)
-    whitelist_groups: list[str] = field(default_factory=list)
 
 
 @dataclass
-class TelegramConfig:
-    """Telegram Adapter 配置"""
-
+class BrowserConfig:
     enabled: bool = False
-    bot_token: str = ""
-    whitelist_users: list[str] = field(default_factory=list)   # Telegram user_id（整数转字符串）
-    whitelist_groups: list[str] = field(default_factory=list)  # Telegram chat_id（负整数转字符串）
-
-
-@dataclass
-class UserIdentityEntry:
-    """一个用户的身份条目（配置层面）"""
-
-    id: str = ""
-    nickname: str = ""
-    note: str = ""
-    role: str = "friend"
-    accounts: list[str] = field(default_factory=list)
-
-
-@dataclass
-class IdentityConfig:
-    """用户身份配置"""
-
-    users: list[UserIdentityEntry] = field(default_factory=list)
-
-
-@dataclass
-class ProviderEntry:
-    """单个 Provider 的配置"""
-
-    name: str = ""
-    model: str = ""
-    extra: dict = field(default_factory=dict)  # provider 特定参数
-
-
-@dataclass
-class ProvidersConfig:
-    """AI 能力提供者配置"""
-
-    enabled: list[str] = field(default_factory=list)  # 启用的 provider 名称
-    entries: dict[str, ProviderEntry] = field(default_factory=dict)  # name → config
+    mode: str = "local"            # "cdp" | "local" | "cloud"
+    cdp_url: str = ""              # CDP 模式: ws://... 或 http://...
+    headless: bool = True
+    browser_path: str = ""         # local 模式: 浏览器路径（留空自动下载）
+    cloud_api_key: str = ""        # cloud 模式: browser-use cloud API key
+    cloud_timeout: int = 15        # cloud 模式: 会话超时（分钟）
 
 
 @dataclass
 class AppConfig:
-    """应用总配置"""
-
     llm: LLMConfig = field(default_factory=LLMConfig)
+    phone: PhoneConfig = field(default_factory=PhoneConfig)
     memory: MemoryConfig = field(default_factory=MemoryConfig)
     consciousness: ConsciousnessConfig = field(default_factory=ConsciousnessConfig)
-    browser: BrowserConfig = field(default_factory=BrowserConfig)
+    notifications: NotificationsConfig = field(default_factory=NotificationsConfig)
     admin: AdminConfig = field(default_factory=AdminConfig)
     persona: PersonaConfig = field(default_factory=PersonaConfig)
-    wechat: WeChatConfig = field(default_factory=WeChatConfig)
-    telegram: TelegramConfig = field(default_factory=TelegramConfig)
-    identity: IdentityConfig = field(default_factory=IdentityConfig)
-    providers: ProvidersConfig = field(default_factory=ProvidersConfig)
+    image: ImageConfig = field(default_factory=ImageConfig)
+    browser: BrowserConfig = field(default_factory=BrowserConfig)
+
+    # 运行时状态：指向 user_mixin.toml 的路径
+    _mixin_path: str = ""
 
 
-def _deep_get(d: dict, *keys: str, default: Any = None) -> Any:
-    """从嵌套字典中安全地获取值"""
-    for key in keys:
-        if isinstance(d, dict):
-            d = d.get(key, default)
+# ---------------------------------------------------------------------------
+# 解析辅助
+# ---------------------------------------------------------------------------
+
+
+def _merge(base: dict, override: dict) -> dict:
+    """递归合并两个字典，override 优先。"""
+    result = base.copy()
+    for k, v in override.items():
+        if k in result and isinstance(result[k], dict) and isinstance(v, dict):
+            result[k] = _merge(result[k], v)
         else:
-            return default
-    return d
+            result[k] = v
+    return result
 
 
-def _load_toml(path: Path) -> dict:
-    """加载 TOML 文件"""
+def _load_toml(path: Path) -> dict[str, Any]:
     if not path.exists():
-        logger.warning(f"配置文件不存在: {path}")
         return {}
     with open(path, "rb") as f:
         return tomllib.load(f)
 
 
-def load_config(
-    config_dir: Optional[Path] = None,
-) -> AppConfig:
-    """
-    加载完整的应用配置。
-
-    加载顺序：
-    1. config/default.toml — 默认配置
-    2. config/secrets.toml — API Keys（可选）
-    3. config/persona.toml — 人格定义
-    """
-    config_dir = config_dir or CONFIG_DIR
-
-    # 1. 加载默认配置
-    defaults = _load_toml(config_dir / "default.toml")
-
-    # 2. 加载 secrets
-    secrets = _load_toml(config_dir / "secrets.toml")
-
-    # 3. 加载 persona
-    persona_data = _load_toml(config_dir / "persona.toml")
-
-    # 构建 LLM 配置
-    llm_config = LLMConfig(
-        primary=LLMModelConfig(
-            provider=_deep_get(defaults, "llm", "primary", "provider", default="openai"),
-            base_url=_deep_get(defaults, "llm", "primary", "base_url", default="https://api.openai.com/v1"),
-            model=_deep_get(defaults, "llm", "primary", "model", default="gpt-4o"),
-            api_key=_deep_get(secrets, "api_keys", "primary", default=""),
-            temperature=_deep_get(defaults, "llm", "primary", "temperature", default=0.7),
-            max_tokens=_deep_get(defaults, "llm", "primary", "max_tokens", default=4096),
-            reasoning_effort=_deep_get(defaults, "llm", "primary", "reasoning_effort", default=None),
-        ),
-        secondary=LLMModelConfig(
-            provider=_deep_get(defaults, "llm", "secondary", "provider", default="openai"),
-            base_url=_deep_get(defaults, "llm", "secondary", "base_url", default="https://api.openai.com/v1"),
-            model=_deep_get(defaults, "llm", "secondary", "model", default="gpt-4o-mini"),
-            api_key=_deep_get(secrets, "api_keys", "secondary", default=""),
-            temperature=_deep_get(defaults, "llm", "secondary", "temperature", default=0.3),
-            max_tokens=_deep_get(defaults, "llm", "secondary", "max_tokens", default=2048),
-        ),
-        embedding=LLMModelConfig(
-            provider=_deep_get(defaults, "llm", "embedding", "provider", default="openai"),
-            base_url=_deep_get(defaults, "llm", "embedding", "base_url", default="https://api.openai.com/v1"),
-            model=_deep_get(defaults, "llm", "embedding", "model", default="text-embedding-3-small"),
-            api_key=_deep_get(secrets, "api_keys", "embedding", default=""),
-            dimensions=_deep_get(defaults, "llm", "embedding", "dimensions", default=1024),
-        ),
+def _parse_llm_model(d: dict) -> LLMModelConfig:
+    return LLMModelConfig(
+        base_url=d.get("base_url", ""),
+        model=d.get("model", ""),
+        api_key=d.get("api_key", ""),
+        temperature=float(d.get("temperature", 0.7)),
+        max_tokens=int(d.get("max_tokens", 8192)),
     )
 
-    # 构建 Persona 配置
-    persona_config = PersonaConfig(
-        name=_deep_get(persona_data, "identity", "name", default="辉夜姬"),
-        age=_deep_get(persona_data, "identity", "age", default=16),
-        origin=_deep_get(persona_data, "identity", "origin", default="月球"),
-        personality=_deep_get(persona_data, "identity", "personality", default=""),
-        tone=_deep_get(persona_data, "speech_style", "tone", default=""),
-        emoji_frequency=_deep_get(persona_data, "speech_style", "emoji_frequency", default="moderate"),
-        speech_examples=_deep_get(persona_data, "speech_style", "examples", default=[]),
-        likes=_deep_get(persona_data, "preferences", "likes", default=[]),
-        dislikes=_deep_get(persona_data, "preferences", "dislikes", default=[]),
-        refuse_topics=_deep_get(persona_data, "boundaries", "refuse_topics", default=[]),
-        max_messages_per_proactive_wake=_deep_get(
-            persona_data, "boundaries", "max_messages_per_proactive_wake", default=2
-        ),
-    )
 
-    # 构建 WeChat 配置
-    wechat_config = WeChatConfig(
-        enabled=_deep_get(defaults, "wechat", "enabled", default=False),
-        base_url=_deep_get(defaults, "wechat", "base_url", default="http://127.0.0.1:8099"),
-        api_key=_deep_get(secrets, "wechat", "api_key", default=""),
-        whitelist_users=_deep_get(defaults, "wechat", "whitelist_users", default=[]),
-        whitelist_groups=_deep_get(defaults, "wechat", "whitelist_groups", default=[]),
-    )
-
-    # 构建 Telegram 配置
-    telegram_config = TelegramConfig(
-        enabled=_deep_get(defaults, "telegram", "enabled", default=False),
-        bot_token=_deep_get(secrets, "telegram", "bot_token", default=""),
-        whitelist_users=[
-            str(uid) for uid in _deep_get(defaults, "telegram", "whitelist_users", default=[])
-        ],
-        whitelist_groups=[
-            str(gid) for gid in _deep_get(defaults, "telegram", "whitelist_groups", default=[])
-        ],
-    )
-
-    # 构建用户身份配置
-    identity_entries = []
-    for u in _deep_get(defaults, "identity", "users", default=[]):
-        identity_entries.append(UserIdentityEntry(
-            id=u.get("id", ""),
-            nickname=u.get("nickname", ""),
-            note=u.get("note", ""),
-            role=u.get("role", "friend"),
-            accounts=u.get("accounts", []),
+def _parse_filters(raw_list: list[dict]) -> list[NotificationFilter]:
+    filters = []
+    for item in raw_list:
+        filters.append(NotificationFilter(
+            pattern=item.get("pattern", ""),
+            target=item.get("target", "any"),
         ))
-    identity_config = IdentityConfig(users=identity_entries)
+    return filters
 
-    # 构建 Providers 配置
-    providers_raw = defaults.get("providers", {})
-    enabled_providers = providers_raw.get("enabled", [])
-    provider_entries = {}
-    for pname in enabled_providers:
-        pconf = providers_raw.get(pname, {})
-        provider_entries[pname] = ProviderEntry(
-            name=pname,
-            model=pconf.get("model", ""),
-            extra=pconf,
-        )
-    providers_config = ProvidersConfig(enabled=enabled_providers, entries=provider_entries)
 
-    config = AppConfig(
-        llm=llm_config,
-        memory=MemoryConfig(
-            short_term_limit=_deep_get(defaults, "memory", "short_term_limit", default=10),
-            vectorize_threshold=_deep_get(defaults, "memory", "vectorize_threshold", default=10),
-            log_hours=_deep_get(defaults, "memory", "log_hours", default=24),
-            retrieval_top_k=_deep_get(defaults, "memory", "retrieval_top_k", default=5),
-        ),
-        consciousness=ConsciousnessConfig(
-            enabled=_deep_get(defaults, "consciousness", "enabled", default=True),
-            heartbeat_interval_minutes=_deep_get(
-                defaults, "consciousness", "heartbeat_interval_minutes", default=30
-            ),
-            jitter_seconds=_deep_get(defaults, "consciousness", "jitter_seconds", default=300),
-            quiet_hours_start=_deep_get(defaults, "consciousness", "quiet_hours_start", default="23:00"),
-            quiet_hours_end=_deep_get(defaults, "consciousness", "quiet_hours_end", default="08:00"),
-        ),
-        browser=BrowserConfig(
-            mode=_deep_get(defaults, "browser", "mode", default="local"),
-            chrome_path=_deep_get(defaults, "browser", "chrome_path", default=""),
-            cloud_proxy_country=_deep_get(defaults, "browser", "cloud_proxy_country", default="us"),
-            cdp_url=_deep_get(defaults, "browser", "cdp_url", default=""),
-            headless=_deep_get(defaults, "browser", "headless", default=True),
-            api_key=_deep_get(secrets, "browser", "browser_use_api_key", default=""),
-        ),
-        admin=AdminConfig(
-            enabled=_deep_get(defaults, "admin", "enabled", default=True),
-            host=_deep_get(defaults, "admin", "host", default="127.0.0.1"),
-            port=_deep_get(defaults, "admin", "port", default=8080),
-            password=_deep_get(secrets, "admin", "password", default=""),
-        ),
-        persona=persona_config,
-        wechat=wechat_config,
-        telegram=telegram_config,
-        identity=identity_config,
-        providers=providers_config,
+# ---------------------------------------------------------------------------
+# user_mixin 写入
+# ---------------------------------------------------------------------------
+
+
+def save_user_mixin(cfg: AppConfig, section: str, data: dict) -> None:
+    """将某个配置段写入 user_mixin.toml（仅更新指定段）。"""
+    mixin_path = Path(cfg._mixin_path)
+    existing = _load_toml(mixin_path)
+    existing[section] = data
+    mixin_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(mixin_path, "wb") as f:
+        tomli_w.dump(existing, f)
+
+
+# ---------------------------------------------------------------------------
+# 主加载函数
+# ---------------------------------------------------------------------------
+
+
+def load_config(config_dir: str | Path | None = None, data_dir: str | Path | None = None) -> AppConfig:
+    """从 config/ 和 data/ 目录加载配置。"""
+    if config_dir is None:
+        config_dir = Path(__file__).parent.parent.parent / "config"
+    config_dir = Path(config_dir)
+
+    if data_dir is None:
+        data_dir = Path(__file__).parent.parent.parent / "data"
+    data_dir = Path(data_dir)
+
+    mixin_path = data_dir / "user_mixin.toml"
+
+    raw: dict[str, Any] = {}
+    for fname in ("default.toml", "secrets.toml", "persona.toml"):
+        raw = _merge(raw, _load_toml(config_dir / fname))
+    # user_mixin 最后加载，优先级最高
+    raw = _merge(raw, _load_toml(mixin_path))
+
+    cfg = AppConfig()
+    cfg._mixin_path = str(mixin_path)
+
+    # ── LLM ──────────────────────────────────────────────────────────────
+    llm_raw = raw.get("llm", {})
+    api_keys = raw.get("api_keys", {})
+
+    primary_raw = dict(llm_raw.get("primary", {}))
+    if not primary_raw.get("api_key") and api_keys.get("primary"):
+        primary_raw["api_key"] = api_keys["primary"]
+    cfg.llm.primary = _parse_llm_model(primary_raw)
+
+    summarizer_raw = dict(llm_raw.get("summarizer", llm_raw.get("secondary", {})))
+    if not summarizer_raw.get("api_key"):
+        summarizer_raw["api_key"] = api_keys.get("summarizer", api_keys.get("secondary", ""))
+    cfg.llm.summarizer = _parse_llm_model(summarizer_raw)
+
+    # ── Phone ─────────────────────────────────────────────────────────────
+    phone_raw = raw.get("phone", {})
+    cfg.phone = PhoneConfig(
+        adb_path=phone_raw.get("adb_path", "adb"),
+        device_serial=phone_raw.get("device_serial", ""),
+        screenshot_scale=float(phone_raw.get("screenshot_scale", 0.5)),
     )
 
-    logger.info(f"配置加载完成: 主模型={config.llm.primary.model}, 次级模型={config.llm.secondary.model}")
-    if identity_entries:
-        logger.info(f"用户身份: {len(identity_entries)} 个已注册用户")
-    return config
+    # ── Memory ────────────────────────────────────────────────────────────
+    mem_raw = raw.get("memory", {})
+    cfg.memory = MemoryConfig(
+        working_memory_size=int(mem_raw.get("working_memory_size", 50)),
+        l1_max=int(mem_raw.get("l1_max", 100)),
+        l1_summarize_batch=int(mem_raw.get("l1_summarize_batch", 20)),
+        l2_max=int(mem_raw.get("l2_max", 50)),
+        l2_summarize_batch=int(mem_raw.get("l2_summarize_batch", 10)),
+        l3_max_tokens=int(mem_raw.get("l3_max_tokens", 2000)),
+        inject_l1_count=int(mem_raw.get("inject_l1_count", 10)),
+        inject_l2_count=int(mem_raw.get("inject_l2_count", 5)),
+    )
+
+    # ── Consciousness ─────────────────────────────────────────────────────
+    con_raw = raw.get("consciousness", {})
+    cfg.consciousness = ConsciousnessConfig(
+        enabled=bool(con_raw.get("enabled", True)),
+        interval_minutes=int(con_raw.get("interval_minutes", 30)),
+        jitter_minutes=int(con_raw.get("jitter_minutes", 10)),
+        quiet_hours=con_raw.get("quiet_hours", ["23:00", "07:00"]),
+    )
+
+    # ── Notifications ─────────────────────────────────────────────────────
+    notif_raw = raw.get("notifications", {})
+    cfg.notifications = NotificationsConfig(
+        poll_interval_seconds=int(notif_raw.get("poll_interval_seconds", 30)),
+        watch_apps=notif_raw.get("watch_apps", []),
+        ignore_apps=notif_raw.get("ignore_apps", []),
+        filters=_parse_filters(notif_raw.get("filters", [])),
+    )
+
+    # ── Admin ─────────────────────────────────────────────────────────────
+    admin_raw = raw.get("admin", {})
+    cfg.admin = AdminConfig(
+        enabled=bool(admin_raw.get("enabled", True)),
+        host=admin_raw.get("host", "127.0.0.1"),
+        port=int(admin_raw.get("port", 8080)),
+        password=admin_raw.get("password", ""),
+    )
+
+    # ── Image ─────────────────────────────────────────────────────────────
+    img_raw = raw.get("image", {})
+    img_api_key = img_raw.get("api_key", "") or api_keys.get("image", "")
+    if not img_api_key:
+        img_api_key = cfg.llm.primary.api_key  # fallback 到主模型 key
+    cfg.image = ImageConfig(
+        enabled=bool(img_raw.get("enabled", False)),
+        model_generate=img_raw.get("model_generate", "wanx2.1-t2i-turbo"),
+        model_edit=img_raw.get("model_edit", "wanx2.1-imageedit"),
+        base_url=img_raw.get("base_url", "https://dashscope.aliyuncs.com/compatible-mode/v1"),
+        api_key=img_api_key,
+    )
+
+    # ── Browser ────────────────────────────────────────────────────────────
+    browser_raw = raw.get("browser", {})
+    browser_api_key = browser_raw.get("cloud_api_key", "") or api_keys.get("browser_cloud", "")
+    cfg.browser = BrowserConfig(
+        enabled=bool(browser_raw.get("enabled", False)),
+        mode=browser_raw.get("mode", "local"),
+        cdp_url=browser_raw.get("cdp_url", ""),
+        headless=bool(browser_raw.get("headless", True)),
+        browser_path=browser_raw.get("browser_path", ""),
+        cloud_api_key=browser_api_key,
+        cloud_timeout=int(browser_raw.get("cloud_timeout", 15)),
+    )
+
+    # ── Persona ───────────────────────────────────────────────────────────
+    persona_raw = raw.get("persona", {})
+    traits = persona_raw.get("traits", {})
+    guidelines = persona_raw.get("guidelines", {})
+    cfg.persona = PersonaConfig(
+        name=persona_raw.get("name", "辉夜姬"),
+        description=persona_raw.get("description", ""),
+        personality=traits.get("personality", ""),
+        speaking_style=traits.get("speaking_style", ""),
+        interests=traits.get("interests", []),
+        guidelines_default=guidelines.get("default", ""),
+        guidelines_chat=guidelines.get("chat", ""),
+        guidelines_notification=guidelines.get("notification", ""),
+        guidelines_heartbeat=guidelines.get("heartbeat", ""),
+    )
+
+    return cfg

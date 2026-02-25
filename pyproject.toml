@@ -1,7 +1,7 @@
 [project]
 name = "openkaguya"
-version = "0.1.0"
-description = "开源版辉夜姬 — 人格化的、拥有主动意识的聊天陪伴助手"
+version = "2.0.0"
+description = "开源版辉夜姬 v2 — 通过 ADB 控制手机的人格化 AI 伴侣"
 readme = "README.md"
 license = { text = "MIT" }
 requires-python = ">=3.12"
@@ -11,28 +11,18 @@ dependencies = [
     "loguru>=0.7.0",
     "tomli-w>=1.0.0",
     "pydantic>=2.0.0",
-    "apscheduler>=3.10.0,<4",
     "aiosqlite>=0.20.0",
-    "sqlite-vec>=0.1.6",
     "Pillow>=10.0.0",
 ]
 
 [project.optional-dependencies]
+browser = [
+    "browser-use>=0.11.0",
+]
 dev = [
     "pytest>=8.0.0",
     "pytest-asyncio>=0.24.0",
     "ruff>=0.8.0",
-]
-browser = [
-    "browser-use>=0.11.11",
-    "langchain-openai>=0.3.0",
-]
-search = [
-    "exa-py>=1.0.0",
-    "tavily-python>=0.5.0",
-]
-all = [
-    "openkaguya[browser,search]",
 ]
 
 [project.scripts]
@@ -55,3 +45,8 @@ select = ["E", "F", "I", "W"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.2",
+]

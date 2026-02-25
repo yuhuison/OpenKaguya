@@ -1,0 +1,22 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(uv run python:*)",
+      "Bash(while read file)",
+      "Bash(do python3:*)",
+      "Bash(done)",
+      "Bash(python3:*)",
+      "Bash(python -m py_compile:*)",
+      "Bash(python:*)",
+      "Bash(adb shell uiautomator:*)",
+      "Bash(adb exec-out:*)",
+      "Bash(adb shell:*)",
+      "Bash(adb pull:*)",
+      "Bash(MSYS_NO_PATHCONV=1 adb shell:*)",
+      "Bash(MSYS_NO_PATHCONV=1 adb pull:*)",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:docs.browser-use.com)",
+      "Bash(uv run ruff check:*)"
+    ]
+  }
+}

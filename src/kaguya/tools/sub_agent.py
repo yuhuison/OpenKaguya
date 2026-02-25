@@ -1,215 +1,192 @@
-"""
-子 Agent 工具 — 辉夜姬可以委派子 Agent 完成特定任务。
+"""sub_agent.py — 子 Agent 委派工具。
 
-支持两种层级：
-- primary: 使用主模型，适合复杂任务，可用完整工具集（除破坏性工具外）
-- secondary: 使用次级模型，速度快上下文大，适合提取/总结/格式转换，工具受限
+允许辉夜姬将复杂任务委派给子 Agent 执行。
+子 Agent 拥有主 Agent 的大部分工具（有黑名单限制）。
 """
 
 from __future__ import annotations
 
 import json
-from typing import Any, Optional
+from typing import Any
 
 from loguru import logger
 
-from kaguya.llm.client import LLMClient
-from kaguya.tools.registry import Tool, ToolRegistry
+# ---------------------------------------------------------------------------
+# 工具黑名单
+# ---------------------------------------------------------------------------
 
-
-# 次级模型禁止使用的工具（具有潜在破坏性）
-SECONDARY_BLOCKED_TOOLS = {
-    "run_terminal",      # 终端命令 — 破坏性
-    "delete_file",       # 文件删除 — 破坏性
-    "browser_open",      # 浏览器系列 — 太重，次级模型不需要
-    "browser_search",
-    "browser_click",
-    "browser_type",
-    "browser_scroll",
-    "browser_screenshot",
-    "browser_get_text",
-    "browser_back",
-    "browser_keys",
-    "browser_close",
+# 所有子 Agent 都不能使用的工具
+ALWAYS_BLOCKED = {
+    "run_sub_agent",   # 防递归
+    "set_avatar",      # 子 Agent 不应改形象
+    "use_phone",       # 子 Agent 已有所有工具，不需要 gateway
+    "use_browser",     # 同上
 }
 
-# 任何子 Agent 都禁止使用的工具（防递归 + 防止直接联系用户）
-ALWAYS_BLOCKED_TOOLS = {
-    "send_message_to_user",  # 子 Agent 不能直接给用户发消息
-    "run_sub_agent",         # 防止递归
-    "use_toolkit",           # 防止子 Agent 激活工具组并泄漏到主 Agent
+# fast 模式额外屏蔽（较重的工具）
+FAST_BLOCKED = {
+    "workspace_terminal",
+    "generate_image",
+    "edit_image",
 }
 
-# 子 Agent 系统 Prompt
-SUB_AGENT_SYSTEM_PROMPT = """你是一个任务执行助手。你需要完成用户给你的具体任务，并返回结果。
+MAX_OUTPUT_CHARS = 8000
 
-规则：
-1. 专注完成任务，不要闲聊
-2. 如果需要使用工具获取信息，可以调用可用的工具
-3. 当任务完成时，在 content 中输出最终结果
-4. 结果应该完整、准确、简洁
-5. 如果任务无法完成，说明原因"""
+SUB_AGENT_SYSTEM = (
+    "你是辉夜姬的子代理，负责完成指定任务。"
+    "直接返回任务结果，不要闲聊。简洁明了。"
+)
 
 
-class SubAgentTool(Tool):
-    """
-    子 Agent 工具：委派子 Agent 完成特定任务。
+# ---------------------------------------------------------------------------
+# 工具 Schema 定义
+# ---------------------------------------------------------------------------
 
-    辉夜姬可以调用此工具来启动一个独立的子 Agent，
-    子 Agent 拥有独立的上下文和工具调用循环，
-    完成任务后将结果返回给辉夜姬。
-    """
+SUB_AGENT_TOOLS: list[dict] = [
+    {
+        "type": "function",
+        "function": {
+            "name": "run_sub_agent",
+            "description": (
+                "启动子 Agent 来执行复杂任务。子 Agent 可以使用手机工具、文件操作等。"
+                "适合耗时较长或需要多步操作的任务（如搜索信息、处理文件等）。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "task": {
+                        "type": "string",
+                        "description": "要完成的任务描述",
+                    },
+                    "model": {
+                        "type": "string",
+                        "enum": ["primary", "fast"],
+                        "description": (
+                            "使用的模型。primary: 主模型（更强但更慢更贵），"
+                            "fast: 快速模型（更快更便宜，适合简单任务）。默认 primary"
+                        ),
+                        "default": "primary",
+                    },
+                    "context": {
+                        "type": "string",
+                        "description": "额外上下文信息（可选）",
+                    },
+                },
+                "required": ["task"],
+            },
+        },
+    },
+]
+
+
+# ---------------------------------------------------------------------------
+# 工具执行器
+# ---------------------------------------------------------------------------
+
+
+class SubAgentToolExecutor:
+    """子 Agent 委派执行器。"""
 
     def __init__(
         self,
-        primary_llm: LLMClient,
-        secondary_llm: LLMClient,
-        tool_registry: ToolRegistry,
+        primary_llm,   # LLMClient
+        secondary_llm,  # LLMClient (summarizer / fast)
+        all_tools: list[dict],
+        all_executors: list,
     ):
-        self._primary_llm = primary_llm
-        self._secondary_llm = secondary_llm
-        self._tool_registry = tool_registry
+        self.primary_llm = primary_llm
+        self.secondary_llm = secondary_llm
+        self.all_tools = all_tools
+        self.all_executors = all_executors
 
-    @property
-    def name(self):
-        return "run_sub_agent"
+    async def execute(self, tool_name: str, args: dict[str, Any]) -> dict[str, Any]:
+        if tool_name != "run_sub_agent":
+            return {"error": f"未知工具: {tool_name}"}
+        try:
+            return await self._run_sub_agent(
+                task=args["task"],
+                model=args.get("model", "primary"),
+                context=args.get("context", ""),
+            )
+        except Exception as e:
+            logger.error(f"子 Agent 执行失败: {e}")
+            return {"error": str(e)}
 
-    @property
-    def description(self):
-        return (
-            "启动一个子 Agent 完成特定任务并返回结果。"
-            "适合有明确输入输出的任务，如：提取信息、总结长文本、格式转换、复杂搜索等。"
-            "model_tier 选择：'primary'=主模型（复杂任务，可用浏览器/搜索），"
-            "'secondary'=次级模型（快速，上下文大，适合总结/提取/格式化，无浏览器和终端）。"
-        )
+    async def _run_sub_agent(
+        self, task: str, model: str = "primary", context: str = ""
+    ) -> dict[str, Any]:
+        """运行子 Agent 多轮工具调用循环。"""
+        # 选择 LLM 和配置
+        is_fast = model == "fast"
+        llm = self.secondary_llm if is_fast else self.primary_llm
+        max_iters = 5 if is_fast else 15
 
-    @property
-    def parameters(self):
-        return {
-            "type": "object",
-            "properties": {
-                "task": {
-                    "type": "string",
-                    "description": (
-                        "任务描述。需要清晰说明：需要做什么、输入是什么、期望的输出格式是什么。"
-                        "例如：'请总结以下文本的要点，输出3-5条要点：{文本内容}'"
-                    ),
-                },
-                "model_tier": {
-                    "type": "string",
-                    "enum": ["primary", "secondary"],
-                    "description": (
-                        "模型层级。primary=主模型（复杂任务），"
-                        "secondary=次级模型（快速处理，上下文大，适合总结/提取）"
-                    ),
-                },
-                "context": {
-                    "type": "string",
-                    "description": "可选的额外上下文信息，会附加在任务描述后面",
-                },
-            },
-            "required": ["task", "model_tier"],
-        }
-
-    async def execute(self, task: str, model_tier: str = "secondary", context: str = "", **_) -> str:
-        if model_tier not in ("primary", "secondary"):
-            return f"错误: model_tier 必须是 'primary' 或 'secondary'，收到: {model_tier}"
-
-        llm = self._primary_llm if model_tier == "primary" else self._secondary_llm
-        max_iterations = 15 if model_tier == "primary" else 5
-
-        # 构建可用工具列表（过滤掉禁止的工具）
-        blocked = ALWAYS_BLOCKED_TOOLS.copy()
-        if model_tier == "secondary":
-            blocked |= SECONDARY_BLOCKED_TOOLS
-        
-        available_tools = self._get_filtered_tools(blocked)
-        tools_schema = [t.to_openai_schema() for t in available_tools] if available_tools else None
+        # 过滤工具
+        blocked = ALWAYS_BLOCKED | (FAST_BLOCKED if is_fast else set())
+        tools = [t for t in self.all_tools if t["function"]["name"] not in blocked]
 
         # 构建消息
-        user_content = task
+        system_msg = SUB_AGENT_SYSTEM
         if context:
-            user_content += f"\n\n附加上下文：\n{context}"
+            system_msg += f"\n\n上下文信息：{context}"
 
         messages: list[dict[str, Any]] = [
-            {"role": "system", "content": SUB_AGENT_SYSTEM_PROMPT},
-            {"role": "user", "content": user_content},
+            {"role": "system", "content": system_msg},
+            {"role": "user", "content": task},
         ]
 
-        tool_names = [t.name for t in available_tools] if available_tools else []
-        logger.info(
-            f"🤖 子 Agent 启动 (tier={model_tier}, tools={len(tool_names)}, max_iter={max_iterations})"
-        )
-        logger.debug(f"🤖 子 Agent 任务: {task[:200]}")
+        logger.info(f"子 Agent 启动: model={model}, task={task[:80]}...")
 
-        # 运行工具调用循环
-        final_output = ""
-        try:
-            for i in range(max_iterations):
-                response = await llm.chat(messages=messages, tools=tools_schema)
+        reply = ""
+        for i in range(max_iters):
+            response = await llm.chat(messages, tools=tools)
+            content_text = response.get("content", "")
+            tool_calls = response.get("tool_calls", [])
 
-                content = response.get("content", "")
-                tool_calls = response.get("tool_calls", [])
-                raw_tool_calls = response.get("raw_tool_calls", [])
+            assistant_msg: dict[str, Any] = {"role": "assistant", "content": content_text}
+            if response.get("raw_tool_calls"):
+                assistant_msg["tool_calls"] = response["raw_tool_calls"]
+            messages.append(assistant_msg)
 
-                # 构建 assistant 消息
-                assistant_msg: dict[str, Any] = {"role": "assistant"}
-                if content:
-                    assistant_msg["content"] = content
-                if raw_tool_calls:
-                    assistant_msg["tool_calls"] = raw_tool_calls
-                messages.append(assistant_msg)
+            if not tool_calls:
+                reply = content_text
+                break
 
-                # 没有工具调用 → 任务完成
-                if not tool_calls:
-                    final_output = content
-                    break
+            # 执行工具
+            for tc in tool_calls:
+                t_name = tc["name"]
+                t_args = tc["arguments"] if isinstance(tc["arguments"], dict) else {}
+                t_id = tc["id"]
 
-                # 执行工具调用
-                for tc in tool_calls:
-                    tc_name = tc["name"]
-                    tc_args = tc["arguments"]
-                    tc_id = tc["id"]
+                logger.debug(f"子 Agent 工具: {t_name}({json.dumps(t_args, ensure_ascii=False)[:200]})")
 
-                    logger.debug(f"🤖 子 Agent 工具调用: {tc_name}({json.dumps(tc_args, ensure_ascii=False)[:200]})")
+                result = await self._execute_tool(t_name, t_args)
 
-                    # 通过 registry 执行（确保设了用户上下文）
-                    tool_result = await self._tool_registry.execute(tc_name, tc_args)
+                # 截断过长结果
+                result_str = json.dumps(result, ensure_ascii=False)
+                if len(result_str) > MAX_OUTPUT_CHARS:
+                    result = {
+                        "truncated": True,
+                        "summary": result_str[:MAX_OUTPUT_CHARS] + "...(截断)",
+                    }
 
-                    # 截断过长的结果
-                    if isinstance(tool_result, str) and len(tool_result) > 8000:
-                        tool_result = tool_result[:8000] + "\n... [结果截断]"
+                content = json.dumps(result, ensure_ascii=False, indent=2)
+                messages.append({"role": "tool", "tool_call_id": t_id, "content": content})
+        else:
+            if not reply:
+                reply = "（子 Agent 处理超时）"
 
-                    logger.debug(f"🤖 子 Agent 工具结果: {tc_name} → {str(tool_result)[:300]}")
+        logger.info(f"子 Agent 完成: {reply[:100]}...")
+        return {"success": True, "result": reply}
 
-                    messages.append({
-                        "role": "tool",
-                        "tool_call_id": tc_id,
-                        "content": tool_result if isinstance(tool_result, str) else json.dumps(tool_result, ensure_ascii=False),
-                    })
-
-                # 记录最新的 content 作为备选输出
-                if content:
-                    final_output = content
-
-            else:
-                # 到达最大轮次
-                final_output = final_output or "子 Agent 达到最大执行轮次，未能完成任务。"
-                logger.warning(f"🤖 子 Agent 达到最大轮次 ({max_iterations})")
-
-        except Exception as e:
-            logger.error(f"🤖 子 Agent 执行失败: {e}")
-            return f"子 Agent 执行失败: {e}"
-
-        logger.info(f"🤖 子 Agent 完成 (tier={model_tier}, output={len(final_output)}字符)")
-        return final_output or "子 Agent 未返回任何结果。"
-
-    def _get_filtered_tools(self, blocked: set[str]) -> list[Tool]:
-        """从主 registry 中获取过滤后的工具列表"""
-        result = []
-        for name in self._tool_registry.tool_names:
-            if name not in blocked:
-                tool = self._tool_registry.get(name)
-                if tool:
-                    result.append(tool)
-        return result
+    async def _execute_tool(self, tool_name: str, args: dict) -> dict[str, Any]:
+        """在所有执行器中查找并执行工具。"""
+        for executor in self.all_executors:
+            if hasattr(executor, "execute"):
+                try:
+                    result = await executor.execute(tool_name, args)
+                    if result.get("error") != f"未知工具: {tool_name}":
+                        return result
+                except Exception as e:
+                    return {"error": str(e)}
+        return {"error": f"未知工具: {tool_name}"}

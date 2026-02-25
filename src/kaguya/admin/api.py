@@ -1,330 +1,336 @@
-"""
-管理面板 REST API — aiohttp 路由。
+"""Admin REST API + Web Chat（V2）— aiohttp 路由。
+
+端点：
+  GET  /                   — 管理界面（聊天 + 设置 tab）
+  POST /api/chat           — 发送消息（支持图片）
+  GET  /api/stats          — 基本状态统计
+  GET  /api/memory/l1      — 近期短期记忆
+  GET  /api/memory/l2      — 近期长期记忆
+  GET  /api/memory/core    — 核心记忆
+  GET  /api/notes          — 所有笔记
+  GET  /api/timers         — 待触发定时器
+  GET  /api/logs           — 最近意识日志
+  GET  /api/working        — 当前工作记忆（L0）
+  GET  /api/phone/apps     — 获取手机已安装应用列表
+  GET  /api/notifications/config — 获取通知配置
+  POST /api/notifications/config — 保存通知配置到 user_mixin.toml
+  GET  /api/debug/sessions       — 交互调试日志
+  POST /api/debug/clear          — 清除调试日志
 """
 
 from __future__ import annotations
 
+import asyncio
+import base64
 import json
 from pathlib import Path
+from typing import TYPE_CHECKING, Optional
 
 from aiohttp import web
 from loguru import logger
 
-from kaguya.config import CONFIG_DIR, DATA_DIR
-from kaguya.memory.database import Database
+from kaguya.config import AdminConfig, AppConfig, save_user_mixin
 
-_EDITABLE_CONFIGS = {"default.toml", "persona.toml"}
-_LOG_DIR = DATA_DIR / "logs"
+if TYPE_CHECKING:
+    from kaguya.core.engine import ChatEngine
+    from kaguya.core.memory import RecursiveMemory
+    from kaguya.phone.controller import PhoneController
+
+_STATIC_DIR = Path(__file__).parent / "static"
 
 
-def create_api_routes(db: Database, consciousness=None, engine=None) -> web.RouteTableDef:
-    """创建 API 路由，绑定到数据库实例"""
-    routes = web.RouteTableDef()
+class AdminAPI:
+    """Admin HTTP API + 网页聊天界面 + 设置管理。"""
 
-    # ==================== 系统统计 ====================
+    def __init__(
+        self,
+        engine: "ChatEngine",
+        memory: "RecursiveMemory",
+        config: AdminConfig,
+        app_config: AppConfig,
+        controller: Optional["PhoneController"] = None,
+        persona_name: str = "辉夜姬",
+    ):
+        self.engine = engine
+        self.memory = memory
+        self.config = config
+        self.app_config = app_config
+        self.controller = controller
+        self.persona_name = persona_name
+        self._app = self._build_app()
 
-    @routes.get("/api/stats")
-    async def get_stats(request: web.Request) -> web.Response:
-        stats = await db.admin_get_stats()
-        return web.json_response(stats)
+    def _build_app(self) -> web.Application:
+        app = web.Application(middlewares=[self._auth_middleware])
+        # 页面
+        app.router.add_get("/", self._index)
+        app.router.add_get("/settings", self._redirect_to_index)
+        # 聊天
+        app.router.add_post("/api/chat", self._chat)
+        app.router.add_post("/api/chat/stream", self._chat_stream)
+        # 管理
+        app.router.add_get("/api/stats", self._stats)
+        app.router.add_get("/api/memory/l1", self._memory_l1)
+        app.router.add_get("/api/memory/l2", self._memory_l2)
+        app.router.add_get("/api/memory/core", self._memory_core)
+        app.router.add_get("/api/notes", self._notes)
+        app.router.add_get("/api/timers", self._timers)
+        app.router.add_get("/api/logs", self._logs)
+        app.router.add_get("/api/working", self._working)
+        # 手机 & 通知配置
+        app.router.add_get("/api/phone/apps", self._phone_apps)
+        app.router.add_get("/api/notifications/config", self._notif_config_get)
+        app.router.add_post("/api/notifications/config", self._notif_config_set)
+        # 调试日志
+        app.router.add_get("/api/debug/sessions", self._debug_sessions)
+        app.router.add_post("/api/debug/clear", self._debug_clear)
+        return app
 
-    # ==================== 用户 & 消息 ====================
+    @web.middleware
+    async def _auth_middleware(self, request: web.Request, handler):
+        if self.config.password:
+            if request.path in ("/", "/settings"):
+                return await handler(request)
+            token = request.headers.get("Authorization", "")
+            if token != f"Bearer {self.config.password}":
+                return web.json_response({"error": "Unauthorized"}, status=401)
+        return await handler(request)
 
-    @routes.get("/api/users")
-    async def get_users(request: web.Request) -> web.Response:
-        users = await db.admin_get_all_users()
-        return web.json_response(users)
+    async def start(self) -> None:
+        runner = web.AppRunner(self._app)
+        await runner.setup()
+        site = web.TCPSite(runner, self.config.host, self.config.port)
+        await site.start()
+        logger.info(f"Web Chat 启动: http://{self.config.host}:{self.config.port}")
 
-    @routes.get("/api/messages")
-    async def get_messages(request: web.Request) -> web.Response:
-        user_id = request.query.get("user_id", "")
-        limit = int(request.query.get("limit", "50"))
-        offset = int(request.query.get("offset", "0"))
-        if not user_id:
-            return web.json_response({"error": "missing user_id"}, status=400)
-        messages = await db.admin_get_messages(user_id, limit, offset)
-        return web.json_response(messages)
+    # ------------------------------------------------------------------
+    # 页面
+    # ------------------------------------------------------------------
 
-    # ==================== 话题 ====================
+    async def _index(self, request: web.Request) -> web.Response:
+        html_path = _STATIC_DIR / "chat.html"
+        if not html_path.exists():
+            return web.Response(text="chat.html not found", status=404)
+        html = html_path.read_text(encoding="utf-8")
+        html = html.replace("{{PERSONA_NAME}}", self.persona_name)
+        html = html.replace("{{PASSWORD}}", self.config.password or "")
+        return web.Response(text=html, content_type="text/html")
 
-    @routes.get("/api/topics")
-    async def get_topics(request: web.Request) -> web.Response:
-        user_id = request.query.get("user_id", "")
-        if not user_id:
-            return web.json_response({"error": "missing user_id"}, status=400)
-        topics = await db.get_all_topics(user_id)
-        return web.json_response(topics)
+    async def _redirect_to_index(self, request: web.Request) -> web.Response:
+        raise web.HTTPFound("/#settings")
 
-    @routes.get("/api/topics/{topic_id}")
-    async def get_topic_detail(request: web.Request) -> web.Response:
-        topic_id = request.match_info["topic_id"]
-        topic = await db.get_topic_by_id(topic_id)
-        if not topic:
-            return web.json_response({"error": "not found"}, status=404)
-        return web.json_response(topic)
+    # ------------------------------------------------------------------
+    # 聊天
+    # ------------------------------------------------------------------
 
-    @routes.get("/api/topics/{topic_id}/messages")
-    async def get_topic_messages(request: web.Request) -> web.Response:
-        topic_id = request.match_info["topic_id"]
-        limit = int(request.query.get("limit", "50"))
-        messages = await db.get_messages_by_topic(topic_id, limit=limit)
-        return web.json_response(messages)
+    async def _chat(self, request: web.Request) -> web.Response:
+        images: list[str] = []
+        content = ""
 
-    # ==================== 笔记 ====================
-
-    @routes.get("/api/notes")
-    async def get_notes(request: web.Request) -> web.Response:
-        notes = await db.admin_get_all_notes()
-        return web.json_response(notes)
-
-    # ==================== 意识日志 ====================
-
-    @routes.get("/api/consciousness-logs")
-    async def get_consciousness_logs(request: web.Request) -> web.Response:
-        limit = int(request.query.get("limit", "20"))
-        logs = await db.get_recent_consciousness_logs(n=limit)
-        return web.json_response(logs)
-
-    # ==================== 计划日程 ====================
-
-    @routes.get("/api/timers")
-    async def get_timers(request: web.Request) -> web.Response:
-        timers = await db.get_active_timers()
-        return web.json_response(timers)
-
-    @routes.post("/api/timers/{timer_id}/trigger")
-    async def trigger_timer(request: web.Request) -> web.Response:
-        """手动提前触发一个计划任务"""
-        timer_id = int(request.match_info["timer_id"])
-        # 从 DB 获取 timer 信息
-        timers = await db.get_active_timers()
-        timer = next((t for t in timers if t["id"] == timer_id), None)
-        if not timer:
-            return web.json_response({"error": "任务不存在或已完成"}, status=404)
-
-        is_recurring = timer.get("recurring", False)
-        repeat_pattern = timer.get("cron") or "none"
-
-        if is_recurring and repeat_pattern != "none" and consciousness:
-            # 周期任务：重新调度到下次
-            next_time = consciousness._calc_next_trigger(
-                timer["trigger_at"], repeat_pattern
-            )
-            await db.reschedule_timer(timer_id, next_time)
+        if "multipart" in request.content_type:
+            reader = await request.multipart()
+            async for part in reader:
+                if part.name == "content":
+                    content = (await part.read()).decode("utf-8")
+                elif part.name == "images":
+                    data = await part.read()
+                    images.append(base64.b64encode(data).decode())
         else:
-            # 一次性任务：直接停用
-            await db.deactivate_timer(timer_id)
-
-        # 触发唤醒
-        if consciousness:
-            import asyncio
-            asyncio.create_task(consciousness._execute_task_wake(timer))
-            logger.info(f"🔔 管理面板手动触发任务: [{timer['name']}]")
-            return web.json_response({"ok": True, "message": f"已触发: {timer['name']}"})
-        else:
-            return web.json_response({"error": "意识系统未连接"}, status=503)
-
-    @routes.delete("/api/timers/{timer_id}")
-    async def delete_timer(request: web.Request) -> web.Response:
-        """删除一个计划任务"""
-        timer_id = int(request.match_info["timer_id"])
-        await db.delete_timer(timer_id)
-        return web.json_response({"ok": True, "message": f"任务 {timer_id} 已删除"})
-
-    @routes.post("/api/wake")
-    async def manual_wake(request: web.Request) -> web.Response:
-        """手动唤醒辉夜姬的主动意识"""
-        if not consciousness:
-            return web.json_response({"error": "意识系统未连接"}, status=503)
-        import asyncio
-        asyncio.create_task(consciousness._wake_up())
-        logger.info("🌙 管理面板手动唤醒意识")
-        return web.json_response({"ok": True, "message": "已触发意识唤醒"})
-
-    # ==================== 配置 ====================
-
-    @routes.get("/api/config")
-    async def get_config(request: web.Request) -> web.Response:
-        result = {}
-        for name in _EDITABLE_CONFIGS:
-            path = CONFIG_DIR / name
-            if path.exists():
-                result[name] = path.read_text(encoding="utf-8")
-        return web.json_response(result)
-
-    @routes.put("/api/config/{filename}")
-    async def update_config(request: web.Request) -> web.Response:
-        filename = request.match_info["filename"]
-        if filename not in _EDITABLE_CONFIGS:
-            return web.json_response(
-                {"error": f"不允许编辑 {filename}"}, status=403
-            )
-        try:
             body = await request.json()
             content = body.get("content", "")
-            if not content:
-                return web.json_response({"error": "内容为空"}, status=400)
+            images = body.get("images", [])
 
-            # 验证 TOML 语法
-            import tomllib
-            tomllib.loads(content)
+        if not content and not images:
+            return web.json_response({"error": "消息不能为空"}, status=400)
 
-            path = CONFIG_DIR / filename
-            path.write_text(content, encoding="utf-8")
-            logger.info(f"📝 管理面板更新配置: {filename}")
-            return web.json_response({"ok": True, "message": f"{filename} 已保存"})
-        except Exception as e:
-            return web.json_response({"error": str(e)}, status=400)
-
-    # ==================== 日志 ====================
-
-    @routes.get("/api/logs")
-    async def list_logs(request: web.Request) -> web.Response:
-        if not _LOG_DIR.exists():
-            return web.json_response([])
-        files = sorted(
-            [f.name for f in _LOG_DIR.iterdir() if f.suffix == ".log"],
-            reverse=True,
-        )
-        return web.json_response(files)
-
-    @routes.get("/api/logs/{filename}")
-    async def get_log_content(request: web.Request) -> web.Response:
-        filename = request.match_info["filename"]
-        # 安全检查
-        if "/" in filename or "\\" in filename or ".." in filename:
-            return web.json_response({"error": "invalid filename"}, status=400)
-        path = _LOG_DIR / filename
-        if not path.exists():
-            return web.json_response({"error": "not found"}, status=404)
-
-        lines = int(request.query.get("lines", "300"))
         try:
-            text = path.read_text(encoding="utf-8", errors="replace")
-            all_lines = text.splitlines()
-            tail = all_lines[-lines:] if len(all_lines) > lines else all_lines
-            return web.json_response({
-                "filename": filename,
-                "total_lines": len(all_lines),
-                "lines": tail,
-            })
+            reply = await self.engine.handle_message(
+                content=content or "（发送了图片）",
+                images=images or None,
+                sender_name="用户",
+            )
+            return web.json_response({"reply": reply})
         except Exception as e:
+            logger.error(f"Chat API 错误: {e}")
             return web.json_response({"error": str(e)}, status=500)
-    # ==================== 测试聊天 ====================
 
-    @routes.post("/api/test/send")
-    async def test_send(request: web.Request) -> web.Response:
-        """
-        测试聊天接口：发送消息给辉夜姬，返回所有回复。
+    async def _chat_stream(self, request: web.Request) -> web.StreamResponse:
+        """流式聊天接口（SSE），实时推送工具调用和截图。"""
+        images: list[str] = []
+        content = ""
 
-        Body: {content, image_base64?, file_base64?, filename?}
-        Response: {responses: [{text, image_url?, file_url?}]}
-        """
-        if not engine:
-            return web.json_response({"error": "引擎未连接"}, status=503)
-
-        import uuid
-        import base64
-        from kaguya.core.types import Platform, UnifiedMessage, UserInfo, Attachment
-
-        try:
+        if "multipart" in request.content_type:
+            reader = await request.multipart()
+            async for part in reader:
+                if part.name == "content":
+                    content = (await part.read()).decode("utf-8")
+                elif part.name == "images":
+                    data = await part.read()
+                    images.append(base64.b64encode(data).decode())
+        else:
             body = await request.json()
-        except Exception:
-            return web.json_response({"error": "无效的 JSON"}, status=400)
+            content = body.get("content", "")
+            images = body.get("images", [])
 
-        content = body.get("content", "").strip()
-        image_b64 = body.get("image_base64")
-        file_b64 = body.get("file_base64")
-        filename = body.get("filename", "uploaded_file")
+        if not content and not images:
+            return web.json_response({"error": "消息不能为空"}, status=400)
 
-        if not content and not image_b64 and not file_b64:
-            return web.json_response({"error": "消息内容不能为空"}, status=400)
+        response = web.StreamResponse(headers={
+            "Content-Type": "text/event-stream",
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        })
+        await response.prepare(request)
 
-        # 构建附件
-        attachments = []
-        if image_b64:
-            attachments.append(Attachment(
-                type="image",
-                data=image_b64,
-                filename="test_image.jpg",
-            ))
-            if not content:
-                content = "[用户发送了图片]"
-        if file_b64:
-            attachments.append(Attachment(
-                type="file",
-                data=file_b64,
-                filename=filename,
-            ))
-            if not content:
-                content = f"[用户发送了文件: {filename}]"
+        queue: asyncio.Queue = asyncio.Queue()
 
-        # 构建 UnifiedMessage
-        message = UnifiedMessage(
-            message_id=str(uuid.uuid4()),
-            platform=Platform.WEB,
-            sender=UserInfo(
-                user_id="admin_test",
-                nickname="管理员",
-                platform=Platform.WEB,
-            ),
-            content=content,
-            attachments=attachments,
-        )
+        async def emit(event: dict) -> None:
+            await queue.put(event)
 
-        # 收集回复
-        responses = []
+        async def run() -> None:
+            try:
+                reply = await self.engine.handle_message_stream(
+                    content=content or "（发送了图片）",
+                    images=images or None,
+                    sender_name="用户",
+                    on_event=emit,
+                )
+                await queue.put({"type": "reply", "text": reply or ""})
+            except Exception as e:
+                logger.error(f"Stream Chat 错误: {e}")
+                await queue.put({"type": "error", "text": str(e)})
+            finally:
+                await queue.put(None)
 
-        async def _collect_callback(
-            text: str, image_path: str | None = None,
-            file_path: str | None = None, **_
-        ):
-            resp_item = {"text": text or ""}
-            if image_path:
-                resp_item["image_url"] = f"/api/test/file?path={image_path}"
-            if file_path:
-                from pathlib import Path as _P
-                resp_item["file_url"] = f"/api/test/file?path={file_path}"
-                resp_item["file_name"] = _P(file_path).name
-            responses.append(resp_item)
+        asyncio.create_task(run())
 
         try:
-            await engine.handle_message(message, send_callback=_collect_callback)
+            while True:
+                event = await queue.get()
+                if event is None:
+                    break
+                data = json.dumps(event, ensure_ascii=False)
+                await response.write(f"data: {data}\n\n".encode("utf-8"))
         except Exception as e:
-            logger.error(f"测试聊天处理失败: {e}")
-            return web.json_response({"error": str(e)}, status=500)
+            logger.warning(f"SSE 连接中断: {e}")
 
-        return web.json_response({"responses": responses})
+        return response
 
-    @routes.get("/api/test/file")
-    async def test_serve_file(request: web.Request) -> web.Response:
-        """读取本地文件并返回（用于展示 AI 回复中的图片/文件）"""
-        from pathlib import Path as _P
-        import mimetypes
+    # ------------------------------------------------------------------
+    # 管理端点
+    # ------------------------------------------------------------------
 
-        file_path = request.query.get("path", "")
-        if not file_path:
-            return web.json_response({"error": "missing path"}, status=400)
-
-        path = _P(file_path).resolve()
-
-        # 安全检查：只允许访问 workspace / data / temp 目录
-        allowed_roots = [
-            _P(DATA_DIR).resolve(),
-            _P.cwd().resolve(),
-        ]
-        if not any(str(path).startswith(str(root)) for root in allowed_roots):
-            return web.json_response({"error": "路径不允许"}, status=403)
-
-        if not path.exists() or not path.is_file():
-            return web.json_response({"error": "文件不存在"}, status=404)
-
-        content_type, _ = mimetypes.guess_type(str(path))
-        content_type = content_type or "application/octet-stream"
-
-        return web.FileResponse(path, headers={
-            "Content-Type": content_type,
-            "Content-Disposition": f'inline; filename="{path.name}"',
+    async def _stats(self, request: web.Request) -> web.Response:
+        return web.json_response({
+            "working_memory_count": len(self.memory.get_working_memory()),
+            "l1_count": len(await self.memory.get_l1_summaries(999)),
+            "l2_count": len(await self.memory.get_l2_summaries(999)),
+            "has_core_memory": bool(await self.memory.get_core_memory()),
         })
 
-    return routes
+    async def _memory_l1(self, request: web.Request) -> web.Response:
+        limit = int(request.rel_url.query.get("limit", 20))
+        return web.json_response(await self.memory.get_l1_summaries(limit))
+
+    async def _memory_l2(self, request: web.Request) -> web.Response:
+        limit = int(request.rel_url.query.get("limit", 10))
+        return web.json_response(await self.memory.get_l2_summaries(limit))
+
+    async def _memory_core(self, request: web.Request) -> web.Response:
+        return web.json_response({"core_memory": await self.memory.get_core_memory()})
+
+    async def _notes(self, request: web.Request) -> web.Response:
+        notes = await self.memory.note_read()
+        return web.json_response([{"title": t, "content": c} for t, c in notes])
+
+    async def _timers(self, request: web.Request) -> web.Response:
+        return web.json_response(await self.memory.timer_list())
+
+    async def _logs(self, request: web.Request) -> web.Response:
+        n = int(request.rel_url.query.get("n", 20))
+        return web.json_response(await self.memory.get_recent_consciousness_logs(n))
+
+    async def _working(self, request: web.Request) -> web.Response:
+        return web.json_response(self.memory.get_working_memory())
+
+    # ------------------------------------------------------------------
+    # 手机 & 通知配置
+    # ------------------------------------------------------------------
+
+    async def _phone_apps(self, request: web.Request) -> web.Response:
+        """通过 ADB 获取手机已安装应用列表。"""
+        if not self.controller:
+            return web.json_response({"error": "未配置手机控制器"}, status=503)
+        try:
+            packages = await self.controller.get_installed_packages()
+            return web.json_response({"apps": sorted(packages)})
+        except Exception as e:
+            return web.json_response({"error": f"获取应用列表失败: {e}"}, status=500)
+
+    async def _notif_config_get(self, request: web.Request) -> web.Response:
+        """返回当前通知配置。"""
+        nc = self.app_config.notifications
+        return web.json_response({
+            "poll_interval_seconds": nc.poll_interval_seconds,
+            "watch_apps": nc.watch_apps,
+            "filters": [{"pattern": f.pattern, "target": f.target} for f in nc.filters],
+        })
+
+    async def _notif_config_set(self, request: web.Request) -> web.Response:
+        """保存通知配置到 user_mixin.toml，并热更新运行时配置。"""
+        body = await request.json()
+
+        # 验证正则合法性
+        import re
+        for f in body.get("filters", []):
+            try:
+                re.compile(f.get("pattern", ""))
+            except re.error as e:
+                return web.json_response(
+                    {"error": f"正则表达式无效「{f.get('pattern', '')}」: {e}"},
+                    status=400,
+                )
+
+        # 构建要保存的数据
+        notif_data: dict = {}
+        if "poll_interval_seconds" in body:
+            notif_data["poll_interval_seconds"] = int(body["poll_interval_seconds"])
+        if "watch_apps" in body:
+            notif_data["watch_apps"] = body["watch_apps"]
+        if "filters" in body:
+            notif_data["filters"] = body["filters"]
+
+        # 写入 user_mixin.toml
+        try:
+            save_user_mixin(self.app_config, "notifications", notif_data)
+        except Exception as e:
+            return web.json_response({"error": f"保存失败: {e}"}, status=500)
+
+        # 热更新运行时配置
+        from kaguya.config import NotificationFilter
+        nc = self.app_config.notifications
+        if "poll_interval_seconds" in notif_data:
+            nc.poll_interval_seconds = notif_data["poll_interval_seconds"]
+        if "watch_apps" in notif_data:
+            nc.watch_apps = notif_data["watch_apps"]
+        if "filters" in notif_data:
+            nc.filters = [
+                NotificationFilter(pattern=f.get("pattern", ""), target=f.get("target", "any"))
+                for f in notif_data["filters"]
+            ]
+
+        logger.info(f"通知配置已更新: watch={nc.watch_apps}, filters={len(nc.filters)}条")
+        return web.json_response({"success": True})
+
+    # ------------------------------------------------------------------
+    # 调试日志
+    # ------------------------------------------------------------------
+
+    async def _debug_sessions(self, request: web.Request) -> web.Response:
+        """返回最近的交互调试日志。"""
+        limit = int(request.rel_url.query.get("limit", 50))
+        return web.json_response(self.engine.interaction_log.get_sessions(limit))
+
+    async def _debug_clear(self, request: web.Request) -> web.Response:
+        """清除所有调试日志。"""
+        self.engine.interaction_log.clear()
+        return web.json_response({"success": True})

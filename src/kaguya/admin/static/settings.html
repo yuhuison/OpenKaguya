@@ -1,0 +1,616 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>设置 — {{PERSONA_NAME}}</title>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&family=Noto+Sans+SC:wght@300;400;500;700&display=swap');
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+:root {
+  --bg: #0f0f14;
+  --surface: #1a1a24;
+  --surface2: #24243a;
+  --surface3: #1e1e30;
+  --border: #2a2a40;
+  --border-light: #35355a;
+  --text: #e8e8f0;
+  --text2: #8888a8;
+  --text3: #5c5c78;
+  --accent: #7c6cf0;
+  --accent2: #9d8df7;
+  --accent-dim: rgba(124, 108, 240, 0.12);
+  --danger: #f06c6c;
+  --danger-dim: rgba(240, 108, 108, 0.12);
+  --success: #6cf0a8;
+  --success-dim: rgba(108, 240, 168, 0.12);
+  --warn: #f0d06c;
+}
+
+html { height: 100%; }
+body {
+  min-height: 100%;
+  background: var(--bg);
+  color: var(--text);
+  font-family: 'Noto Sans SC', -apple-system, BlinkMacSystemFont, sans-serif;
+  font-weight: 400;
+  line-height: 1.6;
+}
+
+/* ── Scrollbar ── */
+::-webkit-scrollbar { width: 5px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: var(--border-light); }
+
+/* ── Layout ── */
+.shell {
+  max-width: 720px;
+  margin: 0 auto;
+  padding: 0 20px 80px;
+}
+
+/* ── Header ── */
+.header {
+  position: sticky; top: 0; z-index: 10;
+  display: flex; align-items: center; gap: 14px;
+  padding: 18px 0;
+  background: var(--bg);
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 32px;
+}
+.header::after {
+  content: '';
+  position: absolute;
+  bottom: -13px; left: 0; right: 0;
+  height: 12px;
+  background: linear-gradient(var(--bg), transparent);
+  pointer-events: none;
+}
+.back-btn {
+  display: flex; align-items: center; justify-content: center;
+  width: 36px; height: 36px;
+  border-radius: 10px;
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  color: var(--text2);
+  font-size: 18px;
+  cursor: pointer;
+  transition: all 0.2s;
+  text-decoration: none;
+}
+.back-btn:hover { background: var(--accent-dim); border-color: var(--accent); color: var(--accent); }
+.header-text h1 { font-size: 17px; font-weight: 700; letter-spacing: -0.3px; }
+.header-text p { font-size: 12px; color: var(--text3); font-weight: 300; }
+
+/* ── Sections ── */
+.section {
+  margin-bottom: 28px;
+  animation: fadeUp 0.4s ease both;
+}
+.section:nth-child(2) { animation-delay: 0.05s; }
+.section:nth-child(3) { animation-delay: 0.1s; }
+.section:nth-child(4) { animation-delay: 0.15s; }
+
+@keyframes fadeUp {
+  from { opacity: 0; transform: translateY(12px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.section-head {
+  display: flex; align-items: center; gap: 10px;
+  margin-bottom: 14px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--border);
+}
+.section-icon {
+  width: 28px; height: 28px;
+  display: flex; align-items: center; justify-content: center;
+  border-radius: 8px;
+  font-size: 14px;
+  flex-shrink: 0;
+}
+.section-icon.purple { background: var(--accent-dim); }
+.section-icon.red { background: var(--danger-dim); }
+.section-icon.green { background: var(--success-dim); }
+.section-head h2 { font-size: 14px; font-weight: 500; letter-spacing: 0.3px; }
+.section-head .hint { margin-left: auto; font-size: 11px; color: var(--text3); }
+
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 16px;
+}
+
+/* ── App List ── */
+.fetch-row {
+  display: flex; gap: 10px; align-items: center;
+  margin-bottom: 12px;
+}
+.btn-fetch {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 8px 14px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--surface2);
+  color: var(--text);
+  font-size: 13px;
+  font-family: inherit;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+.btn-fetch:hover { border-color: var(--accent); background: var(--accent-dim); }
+.btn-fetch:disabled { opacity: 0.5; cursor: wait; }
+.btn-fetch .spin { display: inline-block; animation: spin 1s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+
+.fetch-status { font-size: 12px; color: var(--text3); }
+
+.search-box {
+  width: 100%;
+  padding: 9px 12px 9px 34px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--surface2) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' fill='%235c5c78' viewBox='0 0 16 16'%3E%3Cpath d='M11.742 10.344a6.5 6.5 0 1 0-1.397 1.398h-.001l3.85 3.85a1 1 0 0 0 1.415-1.414l-3.85-3.85zm-5.242.156a5 5 0 1 1 0-10 5 5 0 0 1 0 10z'/%3E%3C/svg%3E") 11px center / 14px no-repeat;
+  color: var(--text);
+  font-size: 13px;
+  font-family: inherit;
+  outline: none;
+  transition: border-color 0.2s;
+  margin-bottom: 10px;
+}
+.search-box:focus { border-color: var(--accent); }
+.search-box::placeholder { color: var(--text3); }
+
+.app-grid {
+  max-height: 220px;
+  overflow-y: auto;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 2px;
+}
+.app-grid:empty::after {
+  content: '点击上方按钮获取应用列表';
+  color: var(--text3);
+  font-size: 12px;
+  padding: 20px 0;
+  width: 100%;
+  text-align: center;
+}
+
+.app-chip {
+  display: inline-flex; align-items: center; gap: 5px;
+  padding: 5px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  font-size: 12px;
+  font-family: 'JetBrains Mono', monospace;
+  color: var(--text2);
+  cursor: pointer;
+  transition: all 0.15s;
+  user-select: none;
+}
+.app-chip:hover { border-color: var(--border-light); }
+.app-chip.checked {
+  border-color: var(--accent);
+  background: var(--accent-dim);
+  color: var(--accent2);
+}
+.app-chip .dot {
+  width: 6px; height: 6px;
+  border-radius: 50%;
+  border: 1.5px solid var(--text3);
+  transition: all 0.15s;
+  flex-shrink: 0;
+}
+.app-chip.checked .dot {
+  background: var(--accent);
+  border-color: var(--accent);
+  box-shadow: 0 0 6px var(--accent-dim);
+}
+
+/* ── Filter Rules ── */
+.filter-list { display: flex; flex-direction: column; gap: 8px; margin-bottom: 14px; }
+.filter-list:empty { display: none; }
+
+.filter-card {
+  display: flex; align-items: center; gap: 10px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  animation: fadeUp 0.2s ease both;
+}
+.filter-pattern {
+  flex: 1;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 13px;
+  color: var(--accent2);
+  word-break: break-all;
+}
+.filter-target {
+  font-size: 11px;
+  padding: 3px 8px;
+  border-radius: 4px;
+  background: var(--surface2);
+  color: var(--text3);
+  white-space: nowrap;
+}
+.filter-del {
+  width: 26px; height: 26px;
+  border-radius: 6px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--text3);
+  font-size: 15px;
+  cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+  transition: all 0.15s;
+  flex-shrink: 0;
+}
+.filter-del:hover { background: var(--danger-dim); border-color: var(--danger); color: var(--danger); }
+
+.add-filter-row {
+  display: flex; gap: 8px; align-items: flex-start;
+}
+.add-filter-row input {
+  flex: 1;
+  padding: 9px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--surface2);
+  color: var(--text);
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 13px;
+  outline: none;
+  transition: border-color 0.2s;
+}
+.add-filter-row input:focus { border-color: var(--accent); }
+.add-filter-row input::placeholder { color: var(--text3); font-family: 'Noto Sans SC', sans-serif; }
+.add-filter-row input.invalid { border-color: var(--danger); }
+
+.add-filter-row select {
+  padding: 9px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--surface2);
+  color: var(--text);
+  font-size: 13px;
+  font-family: inherit;
+  outline: none;
+  cursor: pointer;
+  min-width: 80px;
+}
+.add-filter-row select:focus { border-color: var(--accent); }
+
+.btn-add {
+  padding: 9px 14px;
+  border-radius: 8px;
+  border: 1px solid var(--accent);
+  background: var(--accent-dim);
+  color: var(--accent2);
+  font-size: 13px;
+  font-family: inherit;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: all 0.2s;
+}
+.btn-add:hover { background: var(--accent); color: #fff; }
+.btn-add:disabled { opacity: 0.4; cursor: not-allowed; }
+
+.regex-error {
+  font-size: 11px;
+  color: var(--danger);
+  margin-top: 4px;
+  min-height: 16px;
+}
+
+/* ── Save Bar ── */
+.save-bar {
+  position: fixed; bottom: 0; left: 0; right: 0;
+  padding: 14px 20px;
+  background: linear-gradient(transparent, var(--bg) 30%);
+  display: flex; justify-content: center;
+  pointer-events: none;
+  z-index: 10;
+}
+.btn-save {
+  padding: 12px 40px;
+  border-radius: 12px;
+  border: none;
+  background: var(--accent);
+  color: #fff;
+  font-size: 15px;
+  font-weight: 500;
+  font-family: inherit;
+  cursor: pointer;
+  pointer-events: auto;
+  transition: all 0.25s;
+  box-shadow: 0 4px 24px rgba(124, 108, 240, 0.3);
+}
+.btn-save:hover { background: var(--accent2); transform: translateY(-1px); box-shadow: 0 6px 30px rgba(124, 108, 240, 0.4); }
+.btn-save:active { transform: translateY(0); }
+.btn-save:disabled { opacity: 0.5; cursor: wait; transform: none; }
+.btn-save.saved { background: #2a7050; box-shadow: 0 4px 24px rgba(108, 240, 168, 0.2); }
+
+/* ── Toast ── */
+.toast {
+  position: fixed; top: 20px; right: 20px;
+  padding: 12px 18px;
+  border-radius: 10px;
+  font-size: 13px;
+  z-index: 100;
+  transform: translateX(120%);
+  transition: transform 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+.toast.show { transform: translateX(0); }
+.toast.success { background: var(--success-dim); border: 1px solid var(--success); color: var(--success); }
+.toast.error { background: var(--danger-dim); border: 1px solid var(--danger); color: var(--danger); }
+</style>
+</head>
+<body>
+
+<div class="shell">
+  <div class="header">
+    <a href="/" class="back-btn">←</a>
+    <div class="header-text">
+      <h1>通知设置</h1>
+      <p>{{PERSONA_NAME}} · 管理通知监控与过滤规则</p>
+    </div>
+  </div>
+
+  <!-- Watch Apps -->
+  <div class="section">
+    <div class="section-head">
+      <div class="section-icon purple">📱</div>
+      <h2>监控应用</h2>
+      <span class="hint">只接收这些应用的通知</span>
+    </div>
+    <div class="card">
+      <div class="fetch-row">
+        <button class="btn-fetch" id="fetchAppsBtn" onclick="fetchApps('watch')">
+          <span id="fetchIcon">📲</span> 从手机获取应用列表
+        </button>
+        <span class="fetch-status" id="fetchStatus"></span>
+      </div>
+      <input class="search-box" id="watchSearch" placeholder="搜索应用包名..." oninput="filterApps('watch')">
+      <div class="app-grid" id="watchGrid"></div>
+    </div>
+  </div>
+
+  <!-- Ignore Apps -->
+  <div class="section">
+    <div class="section-head">
+      <div class="section-icon red">🚫</div>
+      <h2>忽略应用</h2>
+      <span class="hint">始终忽略这些应用的通知</span>
+    </div>
+    <div class="card">
+      <input class="search-box" id="ignoreSearch" placeholder="搜索应用包名..." oninput="filterApps('ignore')">
+      <div class="app-grid" id="ignoreGrid"></div>
+    </div>
+  </div>
+
+  <!-- Filter Rules -->
+  <div class="section">
+    <div class="section-head">
+      <div class="section-icon green">⚡</div>
+      <h2>过滤规则</h2>
+      <span class="hint">匹配的通知将被静默丢弃</span>
+    </div>
+    <div class="card">
+      <div class="filter-list" id="filterList"></div>
+      <div class="add-filter-row">
+        <input id="newPattern" placeholder="正则表达式，如 USB.*调试" oninput="validateRegex()">
+        <select id="newTarget">
+          <option value="any">标题+内容</option>
+          <option value="title">仅标题</option>
+          <option value="text">仅内容</option>
+        </select>
+        <button class="btn-add" id="addFilterBtn" onclick="addFilter()">+ 添加</button>
+      </div>
+      <div class="regex-error" id="regexError"></div>
+    </div>
+  </div>
+</div>
+
+<div class="save-bar">
+  <button class="btn-save" id="saveBtn" onclick="saveConfig()">保存设置</button>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+const PASSWORD = '{{PASSWORD}}';
+let allApps = [];
+let watchApps = [];
+let ignoreApps = [];
+let filters = [];
+let pollInterval = 30;
+
+function headers() {
+  const h = { 'Content-Type': 'application/json' };
+  if (PASSWORD) h['Authorization'] = `Bearer ${PASSWORD}`;
+  return h;
+}
+
+function toast(msg, type = 'success') {
+  const el = document.getElementById('toast');
+  el.textContent = msg;
+  el.className = `toast ${type}`;
+  requestAnimationFrame(() => el.classList.add('show'));
+  setTimeout(() => el.classList.remove('show'), 2800);
+}
+
+// ── Load config on start ──
+async function loadConfig() {
+  try {
+    const res = await fetch('/api/notifications/config', { headers: headers() });
+    const data = await res.json();
+    pollInterval = data.poll_interval_seconds || 30;
+    watchApps = data.watch_apps || [];
+    ignoreApps = data.ignore_apps || [];
+    filters = data.filters || [];
+    renderFilters();
+    // If we have apps in config but no fetched list, show them as chips
+    if (watchApps.length || ignoreApps.length) {
+      const known = [...new Set([...watchApps, ...ignoreApps])];
+      if (!allApps.length) allApps = known;
+      renderAppGrid('watch');
+      renderAppGrid('ignore');
+    }
+  } catch (e) {
+    toast('加载配置失败: ' + e.message, 'error');
+  }
+}
+
+// ── Fetch apps from phone ──
+async function fetchApps() {
+  const btn = document.getElementById('fetchAppsBtn');
+  const status = document.getElementById('fetchStatus');
+  const icon = document.getElementById('fetchIcon');
+  btn.disabled = true;
+  icon.innerHTML = '<span class="spin">⟳</span>';
+  status.textContent = '正在获取...';
+
+  try {
+    const res = await fetch('/api/phone/apps', { headers: headers() });
+    const data = await res.json();
+    if (data.error) throw new Error(data.error);
+    allApps = [...new Set([...data.apps, ...watchApps, ...ignoreApps])].sort();
+    renderAppGrid('watch');
+    renderAppGrid('ignore');
+    status.textContent = `共 ${data.apps.length} 个应用`;
+    toast(`获取到 ${data.apps.length} 个应用`);
+  } catch (e) {
+    status.textContent = '获取失败';
+    toast(e.message, 'error');
+  } finally {
+    btn.disabled = false;
+    icon.textContent = '📲';
+  }
+}
+
+// ── Render app chips ──
+function renderAppGrid(type) {
+  const gridId = type === 'watch' ? 'watchGrid' : 'ignoreGrid';
+  const searchId = type === 'watch' ? 'watchSearch' : 'ignoreSearch';
+  const grid = document.getElementById(gridId);
+  const query = document.getElementById(searchId).value.toLowerCase();
+  const selected = type === 'watch' ? watchApps : ignoreApps;
+
+  const apps = allApps.filter(a => !query || a.toLowerCase().includes(query));
+  // Show selected first
+  apps.sort((a, b) => {
+    const aS = selected.includes(a) ? 0 : 1;
+    const bS = selected.includes(b) ? 0 : 1;
+    return aS - bS || a.localeCompare(b);
+  });
+
+  grid.innerHTML = apps.map(pkg => {
+    const checked = selected.includes(pkg);
+    return `<div class="app-chip${checked ? ' checked' : ''}" onclick="toggleApp('${type}','${pkg}')">
+      <span class="dot"></span>${pkg}
+    </div>`;
+  }).join('');
+}
+
+function filterApps(type) { renderAppGrid(type); }
+
+function toggleApp(type, pkg) {
+  const list = type === 'watch' ? watchApps : ignoreApps;
+  const idx = list.indexOf(pkg);
+  if (idx >= 0) list.splice(idx, 1);
+  else list.push(pkg);
+  renderAppGrid(type);
+}
+
+// ── Filters ──
+function renderFilters() {
+  const el = document.getElementById('filterList');
+  el.innerHTML = filters.map((f, i) =>
+    `<div class="filter-card">
+      <span class="filter-pattern">${escHtml(f.pattern)}</span>
+      <span class="filter-target">${{any:'标题+内容',title:'仅标题',text:'仅内容'}[f.target] || f.target}</span>
+      <button class="filter-del" onclick="removeFilter(${i})" title="删除">×</button>
+    </div>`
+  ).join('');
+}
+
+function validateRegex() {
+  const input = document.getElementById('newPattern');
+  const err = document.getElementById('regexError');
+  const btn = document.getElementById('addFilterBtn');
+  const val = input.value.trim();
+  if (!val) { err.textContent = ''; input.classList.remove('invalid'); btn.disabled = false; return; }
+  try {
+    new RegExp(val);
+    err.textContent = '';
+    input.classList.remove('invalid');
+    btn.disabled = false;
+  } catch (e) {
+    err.textContent = '正则无效: ' + e.message.replace(/.*: /, '');
+    input.classList.add('invalid');
+    btn.disabled = true;
+  }
+}
+
+function addFilter() {
+  const input = document.getElementById('newPattern');
+  const target = document.getElementById('newTarget').value;
+  const pattern = input.value.trim();
+  if (!pattern) return;
+  try { new RegExp(pattern); } catch { return; }
+  filters.push({ pattern, target });
+  input.value = '';
+  document.getElementById('regexError').textContent = '';
+  renderFilters();
+}
+
+function removeFilter(idx) {
+  filters.splice(idx, 1);
+  renderFilters();
+}
+
+// ── Save ──
+async function saveConfig() {
+  const btn = document.getElementById('saveBtn');
+  btn.disabled = true;
+  btn.textContent = '保存中...';
+
+  try {
+    const body = {
+      poll_interval_seconds: pollInterval,
+      watch_apps: watchApps,
+      ignore_apps: ignoreApps,
+      filters: filters,
+    };
+    const res = await fetch('/api/notifications/config', {
+      method: 'POST',
+      headers: headers(),
+      body: JSON.stringify(body),
+    });
+    const data = await res.json();
+    if (data.error) throw new Error(data.error);
+    btn.textContent = '已保存 ✓';
+    btn.classList.add('saved');
+    toast('设置已保存，即时生效');
+    setTimeout(() => { btn.textContent = '保存设置'; btn.classList.remove('saved'); }, 2000);
+  } catch (e) {
+    toast('保存失败: ' + e.message, 'error');
+    btn.textContent = '保存设置';
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+function escHtml(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
+
+loadConfig();
+</script>
+</body>
+</html>

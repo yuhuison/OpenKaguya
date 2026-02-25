@@ -1,188 +1,265 @@
-"""
-Workspace 沙箱管理器 — 文件操作隔离与路径穿越保护。
+"""workspace.py — Workspace 文件操作 + 终端命令工具。
+
+提供安全隔离的文件读写和命令执行能力：
+  - 所有文件操作限制在 data/workspaces/kaguya/ 目录内
+  - 路径穿越防护（.. 等不能逃出 workspace）
+  - 终端命令有超时、输出截断、危险命令拦截
 """
 
 from __future__ import annotations
 
-import base64
-import uuid
+import asyncio
+import re
+import shutil
 from pathlib import Path
+from typing import Any
 
 from loguru import logger
 
-from kaguya.config import DATA_DIR
+# ---------------------------------------------------------------------------
+# 危险命令检测
+# ---------------------------------------------------------------------------
+
+_DANGEROUS_PATTERNS: list[re.Pattern] = [
+    re.compile(r"rm\s+(-\w*\s+)*-\w*r\w*\s+/", re.IGNORECASE),  # rm -rf /
+    re.compile(r":\(\)\s*\{.*\|.*&\s*\}\s*;", re.IGNORECASE),    # fork bomb
+    re.compile(r"\b(shutdown|reboot|halt|poweroff)\b", re.IGNORECASE),
+    re.compile(r"\bformat\s+[a-zA-Z]:", re.IGNORECASE),           # format C:
+    re.compile(r"\bmkfs\b", re.IGNORECASE),
+    re.compile(r">\s*/dev/sd[a-z]", re.IGNORECASE),               # write to disk
+    re.compile(r"\bdd\s+.*of=/dev/", re.IGNORECASE),
+]
+
+MAX_OUTPUT_CHARS = 8000
+
+
+def _is_dangerous(command: str) -> str | None:
+    """检查命令是否危险，返回原因或 None。"""
+    for pattern in _DANGEROUS_PATTERNS:
+        if pattern.search(command):
+            return f"检测到危险命令模式: {pattern.pattern}"
+    return None
+
+
+# ---------------------------------------------------------------------------
+# WorkspaceManager
+# ---------------------------------------------------------------------------
 
 
 class WorkspaceManager:
-    """
-    Workspace 沙箱管理器。
+    """管理 data/workspaces/ 目录。"""
 
-    每个用户有独立的 workspace 目录，辉夜姬自己也有一个。
-    所有文件操作都必须在 workspace 内，防止路径穿越攻击。
+    def __init__(self, base_dir: Path):
+        self.base_dir = base_dir
+        self.kaguya_dir = base_dir / "kaguya"
+        self.kaguya_dir.mkdir(parents=True, exist_ok=True)
 
-    目录结构：
-        data/workspaces/
-        ├── kaguya/          # 辉夜姬自己的空间（笔记、截图等）
-        ├── shared/          # 共享文件区
-        ├── user_cli:xxx/    # 用户 workspace
-        └── ...
-    """
-
-    def __init__(self, base_dir: Path | None = None):
-        self.base_dir = base_dir or DATA_DIR / "workspaces"
-        self.base_dir.mkdir(parents=True, exist_ok=True)
-
-        # 辉夜姬自己的 workspace
-        self.kaguya_dir = self.base_dir / "kaguya"
-        self.kaguya_dir.mkdir(exist_ok=True)
-
-        # 共享 workspace
-        self.shared_dir = self.base_dir / "shared"
-        self.shared_dir.mkdir(exist_ok=True)
-
-    def get_user_workspace(self, user_id: str) -> Path:
-        """获取用户的 workspace 路径（自动创建）"""
-        # 替换不安全字符
-        safe_id = user_id.replace(":", "_").replace("/", "_").replace("\\", "_")
-        workspace = self.base_dir / f"user_{safe_id}"
-        workspace.mkdir(parents=True, exist_ok=True)
-        return workspace
-
-    def resolve_path(self, user_id: str, relative_path: str) -> Path:
-        """
-        解析文件路径，确保不逃出 workspace。
-
-        Args:
-            user_id: 用户 ID
-            relative_path: 相对路径（相对于用户 workspace）
-
-        Returns:
-            绝对路径
-
-        Raises:
-            PermissionError: 路径超出 workspace 范围
-        """
-        workspace = self.get_user_workspace(user_id)
-        resolved = (workspace / relative_path).resolve()
-
-        # 路径穿越保护
-        if not str(resolved).startswith(str(workspace.resolve())):
-            raise PermissionError(
-                f"路径 '{relative_path}' 超出了你的 workspace 范围！"
-                f"你只能访问 workspace 内的文件。"
-            )
-        return resolved
-
-    def resolve_kaguya_path(self, relative_path: str) -> Path:
-        """解析辉夜姬自己的 workspace 内的路径"""
+    def resolve_path(self, relative_path: str) -> Path:
+        """解析相对路径，防止路径穿越。"""
         resolved = (self.kaguya_dir / relative_path).resolve()
-        if not str(resolved).startswith(str(self.kaguya_dir.resolve())):
-            raise PermissionError(f"路径 '{relative_path}' 超出了辉夜姬的 workspace 范围！")
+        kaguya_resolved = self.kaguya_dir.resolve()
+        if not str(resolved).startswith(str(kaguya_resolved)):
+            raise PermissionError(f"路径穿越被拒绝: {relative_path}")
         return resolved
 
-    def list_workspace(self, user_id: str) -> list[str]:
-        """列出用户 workspace 中的所有文件"""
-        workspace = self.get_user_workspace(user_id)
+    def list_files(self) -> list[str]:
+        """递归列出 workspace 中所有文件（相对路径）。"""
         files = []
-        for p in workspace.rglob("*"):
+        kaguya_resolved = self.kaguya_dir.resolve()
+        for p in self.kaguya_dir.rglob("*"):
             if p.is_file():
-                files.append(str(p.relative_to(workspace)))
-        return files
+                files.append(str(p.resolve().relative_to(kaguya_resolved)))
+        return sorted(files)
 
-    def save_image(
-        self,
-        user_id: str,
-        data: str | bytes,
-        mime_type: str = "image/jpeg",
-    ) -> str:
-        """
-        将图片保存到 workspace/.images/ 目录。
 
-        Args:
-            user_id: 用户 ID（用于确定存储位置）
-            data: base64 字符串或原始字节
-            mime_type: MIME 类型
+# ---------------------------------------------------------------------------
+# 工具 Schema 定义
+# ---------------------------------------------------------------------------
 
-        Returns:
-            filename（不含目录），如 "abc123.jpg"
-        """
-        ext = {
-            "image/jpeg": "jpg",
-            "image/png": "png",
-            "image/gif": "gif",
-            "image/webp": "webp",
-        }.get(mime_type, "jpg")
+WORKSPACE_TOOLS: list[dict] = [
+    {
+        "type": "function",
+        "function": {
+            "name": "workspace_read",
+            "description": "读取你的 workspace 中的文件内容。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "文件相对路径（相对于 workspace 根目录）",
+                    },
+                },
+                "required": ["path"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "workspace_write",
+            "description": "写入文件到你的 workspace（自动创建目录）。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "文件相对路径",
+                    },
+                    "content": {
+                        "type": "string",
+                        "description": "文件内容",
+                    },
+                },
+                "required": ["path", "content"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "workspace_delete",
+            "description": "删除 workspace 中的文件。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "文件相对路径",
+                    },
+                },
+                "required": ["path"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "workspace_list",
+            "description": "列出 workspace 中的所有文件。",
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "workspace_terminal",
+            "description": (
+                "在 workspace 目录下执行命令行命令。"
+                "有安全限制：30 秒超时、输出截断、危险命令拦截。"
+                "适合运行脚本、查看系统信息等操作。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "command": {
+                        "type": "string",
+                        "description": "要执行的命令",
+                    },
+                    "timeout": {
+                        "type": "integer",
+                        "description": "超时时间（秒），默认 30，最大 120",
+                        "default": 30,
+                    },
+                },
+                "required": ["command"],
+            },
+        },
+    },
+]
 
-        images_dir = self.get_user_workspace(user_id) / ".images"
-        images_dir.mkdir(exist_ok=True)
 
-        filename = f"{uuid.uuid4().hex[:12]}.{ext}"
-        filepath = images_dir / filename
+# ---------------------------------------------------------------------------
+# 工具执行器
+# ---------------------------------------------------------------------------
 
-        if isinstance(data, str):
-            # base64 字符串
-            raw = base64.b64decode(data)
+
+class WorkspaceToolExecutor:
+    """Workspace 文件操作 + 终端执行器。"""
+
+    def __init__(self, workspace: WorkspaceManager):
+        self.workspace = workspace
+
+    async def execute(self, tool_name: str, args: dict[str, Any]) -> dict[str, Any]:
+        handler = getattr(self, f"_tool_{tool_name}", None)
+        if handler is None:
+            return {"error": f"未知工具: {tool_name}"}
+        try:
+            return await handler(**args)
+        except PermissionError as e:
+            return {"error": f"权限被拒绝: {e}"}
+        except Exception as e:
+            logger.error(f"Workspace 工具 [{tool_name}] 执行失败: {e}")
+            return {"error": str(e)}
+
+    async def _tool_workspace_read(self, path: str) -> dict[str, Any]:
+        resolved = self.workspace.resolve_path(path)
+        if not resolved.exists():
+            return {"error": f"文件不存在: {path}"}
+        if not resolved.is_file():
+            return {"error": f"不是文件: {path}"}
+        content = await asyncio.to_thread(resolved.read_text, encoding="utf-8")
+        return {"success": True, "path": path, "content": content, "size": len(content)}
+
+    async def _tool_workspace_write(self, path: str, content: str) -> dict[str, Any]:
+        resolved = self.workspace.resolve_path(path)
+        resolved.parent.mkdir(parents=True, exist_ok=True)
+        await asyncio.to_thread(resolved.write_text, content, encoding="utf-8")
+        logger.info(f"Workspace 写入: {path} ({len(content)} 字符)")
+        return {"success": True, "path": path, "size": len(content)}
+
+    async def _tool_workspace_delete(self, path: str) -> dict[str, Any]:
+        resolved = self.workspace.resolve_path(path)
+        if not resolved.exists():
+            return {"error": f"文件不存在: {path}"}
+        if resolved.is_dir():
+            await asyncio.to_thread(shutil.rmtree, resolved)
         else:
-            raw = data
+            resolved.unlink()
+        logger.info(f"Workspace 删除: {path}")
+        return {"success": True, "deleted": path}
 
-        filepath.write_bytes(raw)
-        logger.debug(f"图片已保存: {filepath}")
-        return filename
+    async def _tool_workspace_list(self) -> dict[str, Any]:
+        files = self.workspace.list_files()
+        return {"success": True, "files": files, "count": len(files)}
 
-    def save_file(
-        self,
-        user_id: str,
-        filename: str,
-        data: str | bytes,
-    ) -> str:
-        """
-        将文件保存到 workspace/.files/ 目录。
+    async def _tool_workspace_terminal(
+        self, command: str, timeout: int = 30
+    ) -> dict[str, Any]:
+        # 安全检查
+        danger = _is_dangerous(command)
+        if danger:
+            return {"error": f"命令被拦截: {danger}"}
 
-        Args:
-            user_id: 用户 ID
-            filename: 原始文件名（如 "report.pdf"）
-            data: base64 字符串或原始字节
+        timeout = min(max(timeout, 1), 120)
 
-        Returns:
-            保存后的文件名（含 UUID 前缀避免冲突），如 "a1b2c3d4_report.pdf"
-        """
-        files_dir = self.get_user_workspace(user_id) / ".files"
-        files_dir.mkdir(exist_ok=True)
+        try:
+            proc = await asyncio.create_subprocess_shell(
+                command,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                cwd=str(self.workspace.kaguya_dir),
+            )
+            stdout_bytes, stderr_bytes = await asyncio.wait_for(
+                proc.communicate(), timeout=timeout
+            )
+        except asyncio.TimeoutError:
+            proc.kill()
+            return {"error": f"命令超时 ({timeout}s): {command}"}
 
-        # 用短 UUID 前缀避免文件名冲突
-        safe_name = f"{uuid.uuid4().hex[:8]}_{filename}"
-        filepath = files_dir / safe_name
+        stdout = stdout_bytes.decode("utf-8", errors="replace")
+        stderr = stderr_bytes.decode("utf-8", errors="replace")
 
-        if isinstance(data, str):
-            raw = base64.b64decode(data)
-        else:
-            raw = data
+        # 截断输出
+        if len(stdout) > MAX_OUTPUT_CHARS:
+            stdout = stdout[:MAX_OUTPUT_CHARS] + f"\n...(输出被截断，共 {len(stdout_bytes)} 字符)"
+        if len(stderr) > MAX_OUTPUT_CHARS:
+            stderr = stderr[:MAX_OUTPUT_CHARS] + f"\n...(输出被截断)"
 
-        filepath.write_bytes(raw)
-        logger.debug(f"文件已保存: {filepath} ({len(raw)} bytes)")
-        return safe_name
-
-    def get_file_path(self, user_id: str, filename: str) -> Path | None:
-        """根据文件名获取文件的完整路径，不存在则返回 None"""
-        filepath = self.get_user_workspace(user_id) / ".files" / filename
-        return filepath if filepath.exists() else None
-
-    def get_image_path(self, user_id: str, filename: str) -> Path | None:
-        """根据文件名获取图片的完整路径，不存在则返回 None"""
-        filepath = self.get_user_workspace(user_id) / ".images" / filename
-        return filepath if filepath.exists() else None
-
-    def read_image_as_base64(self, user_id: str, filename: str) -> tuple[str, str] | None:
-        """
-        读取图片并返回 (base64_str, mime_type)，文件不存在则返回 None。
-        """
-        filepath = self.get_image_path(user_id, filename)
-        if not filepath:
-            return None
-        ext = filepath.suffix.lower().lstrip(".")
-        mime = {
-            "jpg": "image/jpeg", "jpeg": "image/jpeg",
-            "png": "image/png", "gif": "image/gif", "webp": "image/webp",
-        }.get(ext, "image/jpeg")
-        b64 = base64.b64encode(filepath.read_bytes()).decode("utf-8")
-        return b64, mime
+        logger.info(f"Workspace 终端: {command} (exit={proc.returncode})")
+        return {
+            "success": proc.returncode == 0,
+            "exit_code": proc.returncode,
+            "stdout": stdout,
+            "stderr": stderr,
+        }
