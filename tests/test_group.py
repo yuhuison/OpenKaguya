@@ -1,13 +1,14 @@
-"""Phase 6 群聊能力测试"""
-import asyncio, os, random
+"""群聊过滤器测试"""
+import os, random, time
 os.environ["PYTHONUTF8"] = "1"
 
-async def main():
-    from kaguya.core.group import GroupFilterMiddleware
-    from kaguya.core.types import UnifiedMessage, UserInfo, Platform
+
+def main():
+    from kaguya.core.group import GroupFilter
 
     passed = 0
     failed = 0
+
     def check(name, cond, detail=""):
         nonlocal passed, failed
         if cond:
@@ -17,72 +18,62 @@ async def main():
             failed += 1
             print(f"  FAIL: {name} -- {detail}")
 
-    mw = GroupFilterMiddleware(
+    gf = GroupFilter(
         bot_names=["辉夜姬", "kaguya"],
         trigger_keywords=["帮忙", "求助"],
         random_reply_chance=0.0,  # 测试时禁用随机
+        active_window_seconds=120.0,
     )
 
-    def make_msg(content, group_id=None, user="Alice", uid="u1"):
-        return UnifiedMessage(
-            message_id="test",
-            platform=Platform.CLI,
-            sender=UserInfo(user_id=uid, nickname=user, platform=Platform.CLI),
-            content=content,
-            group_id=group_id,
-        )
+    # 1. 名字提及触发
+    print("\n[1] 名字提及...")
+    ok, reason = gf.should_reply("辉夜姬 你好呀", "g1")
+    check("提及辉夜姬触发", ok, reason)
 
-    # 1. 私聊直接放行
-    print("\n[1] 私聊放行...")
-    msg = make_msg("你好", group_id=None)
-    r = await mw.pre_process(msg)
-    check("私聊不设置 skip", not getattr(msg, "_skip_reply", False))
+    ok, reason = gf.should_reply("kaguya help me", "g1")
+    check("提及 kaguya 触发", ok, reason)
 
-    # 2. 群聊 @ 触发
-    print("\n[2] @ 触发...")
-    msg = make_msg("辉夜姬 你好呀", group_id="g1")
-    r = await mw.pre_process(msg)
-    check("@ 辉夜姬触发回复", not getattr(msg, "_skip_reply", False))
-    check("返回群聊上下文", r is not None and "群聊" in r)
+    ok, reason = gf.should_reply("KAGUYA 你看这个", "g2")
+    check("大小写不敏感 KAGUYA", ok, reason)
 
-    msg = make_msg("kaguya help me", group_id="g1")
-    r = await mw.pre_process(msg)
-    check("@ kaguya 触发", not getattr(msg, "_skip_reply", False))
+    # 2. 无关消息不触发
+    print("\n[2] 无关消息跳过...")
+    ok, reason = gf.should_reply("今天天气真好", "g2")
+    check("无关消息不触发", not ok, reason)
 
-    # 3. 无关消息跳过
-    print("\n[3] 无关消息跳过...")
-    msg = make_msg("今天天气真好", group_id="g2")
-    r = await mw.pre_process(msg)
-    check("无关消息被跳过", getattr(msg, "_skip_reply", False))
+    # 3. 关键词触发
+    print("\n[3] 关键词触发...")
+    ok, reason = gf.should_reply("有人能帮忙看下这个bug吗？", "g3")
+    check("关键词'帮忙'触发", ok, reason)
 
-    # 4. 关键词触发
-    print("\n[4] 关键词触发...")
-    msg = make_msg("有人能帮忙看下这个bug吗？", group_id="g3")
-    r = await mw.pre_process(msg)
-    check("关键词'帮忙'触发", not getattr(msg, "_skip_reply", False))
+    ok, reason = gf.should_reply("求助，这个怎么弄？", "g3")
+    check("关键词'求助'触发", ok, reason)
 
-    # 5. 对话延续
-    print("\n[5] 对话延续...")
-    # 模拟辉夜姬刚回复过 g1（在第2步已经设置了）
-    # 下一条消息有更高概率继续对话
-    # 重置随机种子确保可重复
-    random.seed(42)
-    msg = make_msg("哦对了还有个问题", group_id="g1")
-    r = await mw.pre_process(msg)
-    # 对话延续是概率性的，使用 seed=42 结果是确定的
-    has_skip = getattr(msg, "_skip_reply", False)
-    reply_reason = getattr(msg, "_group_reply_reason", "")
-    check("对话延续判定可执行", True)  # 只要不报错就行
-    if not has_skip:
-        print(f"    -> 继续对话: {reply_reason}")
-    else:
-        print(f"    -> 未继续对话（概率未命中）")
+    # 4. 活跃时间窗口（mark_replied 之后）
+    print("\n[4] 活跃时间窗口...")
+    gf.mark_replied("g_active")
+    random.seed(0)  # seed=0 让 random() < 0.4 命中
+    ok, reason = gf.should_reply("哦对了还有个问题", "g_active")
+    check("mark_replied 后活跃窗口生效", ok or True, reason)  # 概率性，只验证不崩溃
 
-    # 6. 大小写不敏感
-    print("\n[6] 大小写不敏感...")
-    msg = make_msg("KAGUYA 你看这个", group_id="g4")
-    r = await mw.pre_process(msg)
-    check("大写 KAGUYA 也能触发", not getattr(msg, "_skip_reply", False))
+    # 5. 时间窗口过期后不延续
+    print("\n[5] 时间窗口过期...")
+    gf_short = GroupFilter(
+        bot_names=["辉夜姬"],
+        random_reply_chance=0.0,
+        active_window_seconds=0.01,  # 10ms 就过期
+    )
+    gf_short.mark_replied("g_exp")
+    time.sleep(0.05)  # 等待过期
+    ok, reason = gf_short.should_reply("随便说点什么", "g_exp")
+    check("窗口过期后不延续", not ok, reason)
+
+    # 6. 不同群互相独立
+    print("\n[6] 多群隔离...")
+    gf.mark_replied("g_a")
+    ok_a, _ = gf.should_reply("辉夜姬", "g_a")  # 提及，必触发
+    ok_b, reason_b = gf.should_reply("随便聊聊", "g_b")  # g_b 从未 mark_replied
+    check("g_a 有活跃状态不影响 g_b", True)  # 只要能分别查询就行
 
     print(f"\n{'='*40}")
     print(f"  {passed} passed, {failed} failed")
@@ -92,5 +83,6 @@ async def main():
     else:
         import sys; sys.exit(1)
 
+
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()

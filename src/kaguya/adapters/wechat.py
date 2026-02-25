@@ -20,6 +20,7 @@ from loguru import logger
 
 from kaguya.adapters.base import PlatformAdapter
 from kaguya.config import WeChatConfig
+from kaguya.core.group import GroupFilter
 from kaguya.core.identity import UserIdentityManager
 from kaguya.core.types import Attachment, Platform, UnifiedMessage, UserInfo
 from kaguya.tools.workspace import WorkspaceManager
@@ -80,11 +81,13 @@ class WeChatAdapter(PlatformAdapter):
         config: WeChatConfig,
         identity_manager: UserIdentityManager,
         workspace: WorkspaceManager | None = None,
+        group_filter: GroupFilter | None = None,
     ):
         super().__init__("wechat")
         self.config = config
         self.identity = identity_manager
         self._workspace = workspace
+        self._group_filter = group_filter
         self._running = False
         self._ws_task: Optional[asyncio.Task] = None
         self._session: Optional[aiohttp.ClientSession] = None
@@ -377,12 +380,21 @@ class WeChatAdapter(PlatformAdapter):
                 merged_content = "[用户发送了附件]"
 
 
+        # 群聊过滤：在进入 ChatEngine 之前判断（零开销，不触发锁/DB/中间件）
+        group_id = buf.group_id
+        if group_id and self._group_filter:
+            should, reason = self._group_filter.should_reply(merged_content, group_id)
+            if not should:
+                logger.debug(f"群聊过滤: 跳过 [{group_id}] ({reason})")
+                return
+            logger.debug(f"群聊过滤: 回复 [{group_id}] (原因: {reason})")
+
         message = UnifiedMessage(
             message_id=buf.message_id,
             platform=Platform.WECHAT,
             sender=buf.sender,
             content=merged_content,
-            group_id=buf.group_id,
+            group_id=group_id,
             attachments=attachments,
         )
 
@@ -414,6 +426,9 @@ class WeChatAdapter(PlatformAdapter):
                         delay = min(delay, 4.0)
                         await asyncio.sleep(delay)
                     send_count += 1
+                    # 第一次发出回复时，更新群聊活跃时间窗口
+                    if send_count == 1 and group_id and self._group_filter:
+                        self._group_filter.mark_replied(group_id)
                     if text:
                         await self._send_single(target, text)
                     if image_path:

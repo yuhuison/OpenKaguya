@@ -365,13 +365,6 @@ class ChatEngine:
             except Exception as e:
                 logger.error(f"中间件 {mw.name} 前置处理异常: {e}")
 
-        # 群聊跳过检查（中间件设置了 _skip_reply）
-        if getattr(message, "_skip_reply", False):
-            # 仍然保存到历史（辉夜姬能看到群聊记录），但不回复
-            user_msg = {"role": "user", "content": f"[{user_name}]: {message.content}"}
-            history.append(user_msg)
-            return []
-
         # === 1. 构建初始请求 Context ===
         base_system = self._system_prompt
         
@@ -383,6 +376,9 @@ class ChatEngine:
         weekday = ["一", "二", "三", "四", "五", "六", "日"][now.weekday()]
         os_info = f"{platform.system()} {platform.release()}"
         base_system += f"\n\n【当前环境】\n时间: {time_str} (星期{weekday})\n系统: {os_info}"
+
+        if message.is_group_message and message.group_id:
+            base_system += f"\n\n【群聊模式】你当前在群 {message.group_id} 中，消息来自群成员 {user_name}。"
 
         if extra_system_prompts:
             base_system += "\n\n【系统附加信息】\n" + "\n".join(extra_system_prompts)

@@ -122,6 +122,16 @@ class WeChatConfig:
 
 
 @dataclass
+class TelegramConfig:
+    """Telegram Adapter 配置"""
+
+    enabled: bool = False
+    bot_token: str = ""
+    whitelist_users: list[str] = field(default_factory=list)   # Telegram user_id（整数转字符串）
+    whitelist_groups: list[str] = field(default_factory=list)  # Telegram chat_id（负整数转字符串）
+
+
+@dataclass
 class UserIdentityEntry:
     """一个用户的身份条目（配置层面）"""
 
@@ -167,6 +177,7 @@ class AppConfig:
     admin: AdminConfig = field(default_factory=AdminConfig)
     persona: PersonaConfig = field(default_factory=PersonaConfig)
     wechat: WeChatConfig = field(default_factory=WeChatConfig)
+    telegram: TelegramConfig = field(default_factory=TelegramConfig)
     identity: IdentityConfig = field(default_factory=IdentityConfig)
     providers: ProvidersConfig = field(default_factory=ProvidersConfig)
 
@@ -266,6 +277,18 @@ def load_config(
         whitelist_groups=_deep_get(defaults, "wechat", "whitelist_groups", default=[]),
     )
 
+    # 构建 Telegram 配置
+    telegram_config = TelegramConfig(
+        enabled=_deep_get(defaults, "telegram", "enabled", default=False),
+        bot_token=_deep_get(secrets, "telegram", "bot_token", default=""),
+        whitelist_users=[
+            str(uid) for uid in _deep_get(defaults, "telegram", "whitelist_users", default=[])
+        ],
+        whitelist_groups=[
+            str(gid) for gid in _deep_get(defaults, "telegram", "whitelist_groups", default=[])
+        ],
+    )
+
     # 构建用户身份配置
     identity_entries = []
     for u in _deep_get(defaults, "identity", "users", default=[]):
@@ -324,6 +347,7 @@ def load_config(
         ),
         persona=persona_config,
         wechat=wechat_config,
+        telegram=telegram_config,
         identity=identity_config,
         providers=providers_config,
     )

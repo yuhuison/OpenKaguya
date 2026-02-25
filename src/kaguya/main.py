@@ -201,6 +201,12 @@ async def run_cli():
     ]
     identity_mgr = UserIdentityManager(identities)
 
+    # 群聊过滤器（多个 adapter 共享同一实例）
+    from kaguya.core.group import GroupFilter
+    group_filter = GroupFilter(
+        bot_names=[config.persona.name, "kaguya", "Kaguya"],
+    )
+
     # 条件初始化微信适配器
     wechat_adapter = None
     if config.wechat.enabled:
@@ -209,11 +215,23 @@ async def run_cli():
             config=config.wechat,
             identity_manager=identity_mgr,
             workspace=workspace,
+            group_filter=group_filter,
+        )
+
+    # 条件初始化 Telegram 适配器
+    telegram_adapter = None
+    if config.telegram.enabled:
+        from kaguya.adapters.telegram import TelegramAdapter
+        telegram_adapter = TelegramAdapter(
+            config=config.telegram,
+            identity_manager=identity_mgr,
+            workspace=workspace,
+            group_filter=group_filter,
         )
 
     # 8. 初始化对话引擎 & 注册中间件
     # 收集所有活跃的 adapter（用于工具和 prompt 注入）
-    all_adapters = [a for a in [wechat_adapter] if a is not None]
+    all_adapters = [a for a in [wechat_adapter, telegram_adapter] if a is not None]
 
     # 注册 chat 阶段的 adapter 工具
     for ada in all_adapters:
@@ -242,17 +260,14 @@ async def run_cli():
         providers=all_providers,
         toolkit_router=toolkit_router,
     )
-    # 注册中间件（顺序重要：群聊过滤 → 记忆系统）
-    from kaguya.core.group import GroupFilterMiddleware
-    group_filter = GroupFilterMiddleware(
-        bot_names=[config.persona.name, "kaguya", "Kaguya"],
-    )
-    engine.add_middleware(group_filter)
+    # 注册中间件
     engine.add_middleware(memory_mw)
 
     # 设置 adapter handler（engine 已创建）
     if wechat_adapter:
         wechat_adapter.set_handler(engine.handle_message)
+    if telegram_adapter:
+        telegram_adapter.set_handler(engine.handle_message)
 
     # 9. 初始化主动意识系统
     from kaguya.core.consciousness import ConsciousnessScheduler
@@ -313,6 +328,9 @@ async def run_cli():
     if wechat_adapter:
         await wechat_adapter.start()
         logger.info("📱 微信适配器已启动")
+    if telegram_adapter:
+        await telegram_adapter.start()
+        logger.info("📲 Telegram 适配器已启动")
 
     try:
         if is_interactive and adapter:
@@ -335,6 +353,8 @@ async def run_cli():
             await adapter.stop()
         if wechat_adapter:
             await wechat_adapter.stop()
+        if telegram_adapter:
+            await telegram_adapter.stop()
         if admin_runner:
             await admin_runner.cleanup()
         if browser_toolkit:
