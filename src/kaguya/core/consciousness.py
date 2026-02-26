@@ -227,7 +227,7 @@ class ConsciousnessScheduler:
     def _build_notification_prompt(self, count: int, lines: list[str]) -> str:
         """构建通知唤醒 prompt。"""
         return (
-            f"你的电脑检测到 {count} 个窗口有新变化：\n"
+            f"你的电脑收到了 {count} 条新通知：\n"
             + "\n".join(lines)
             + "\n\n【处理方式】\n"
             "如果要查看或回复消息，推荐操作流程：\n"

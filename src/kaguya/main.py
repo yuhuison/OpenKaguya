@@ -138,11 +138,17 @@ async def async_main() -> None:
         task_tracker=task_tracker,
     )
 
+    # ── 通知源 ─────────────────────────────────────────────────────────
+    notification_source = None
+    if config.desktop.enabled:
+        from kaguya.desktop.notifications import WinRTNotificationSource
+        notification_source = WinRTNotificationSource()
+
     # ── 意识调度器 ────────────────────────────────────────────────────
     consciousness = ConsciousnessScheduler(
         engine=engine,
         memory=memory,
-        notification_source=desktop_controller if config.desktop.enabled else None,
+        notification_source=notification_source,
         consciousness_config=config.consciousness,
         notifications_config=config.notifications,
         persona=config.persona,

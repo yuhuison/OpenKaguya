@@ -373,7 +373,7 @@ body {
     <div class="card">
       <div class="fetch-row">
         <button class="btn-fetch" id="fetchAppsBtn" onclick="fetchApps('watch')">
-          <span id="fetchIcon">🖥️</span> 获取窗口进程列表
+          <span id="fetchIcon">🖥️</span> 获取应用列表
         </button>
         <span class="fetch-status" id="fetchStatus"></span>
       </div>
@@ -475,15 +475,15 @@ async function fetchApps() {
   const icon = document.getElementById('fetchIcon');
   btn.disabled = true;
   icon.innerHTML = '<span class="spin">⟳</span>';
-  status.textContent = '桌面模式下请手动输入进程名（如 WeChat.exe）';
+  status.textContent = '请输入应用显示名称（如 微信、QQ）';
 
   try {
-    // 桌面模式：无需从设备获取，直接使用已配置的列表
+    // 使用已配置的列表
     allApps = [...new Set([...watchApps, ...ignoreApps])].sort();
     renderAppGrid('watch');
     renderAppGrid('ignore');
-    status.textContent = `已加载 ${allApps.length} 个进程`;
-    toast('桌面模式：请手动添加进程名');
+    status.textContent = `已加载 ${allApps.length} 个应用`;
+    toast('请手动添加应用名称');
   } catch (e) {
     status.textContent = '获取失败';
     toast(e.message, 'error');

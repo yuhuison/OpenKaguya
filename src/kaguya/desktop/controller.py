@@ -125,7 +125,7 @@ class DesktopController:
     """通过 Win32 API 控制 Windows 桌面。"""
 
     def __init__(self) -> None:
-        self._prev_titles: dict[int, str] = {}  # hwnd → 上次窗口标题（通知检测用）
+        pass
 
     # ------------------------------------------------------------------
     # 截图
@@ -432,32 +432,3 @@ class DesktopController:
     async def clipboard_write(self, text: str) -> None:
         await asyncio.to_thread(self.clipboard_write_sync, text)
 
-    # ------------------------------------------------------------------
-    # 通知检测（窗口标题变化监控）
-    # ------------------------------------------------------------------
-
-    def get_notifications_sync(self) -> list[dict[str, Any]]:
-        """检测窗口标题变化，返回通知格式的字典列表。"""
-        current_titles: dict[int, str] = {}
-        notifications: list[dict[str, Any]] = []
-
-        windows = self.list_windows_sync()
-        for w in windows:
-            hwnd = w["hwnd"]
-            title = w["title"]
-            current_titles[hwnd] = title
-
-            prev_title = self._prev_titles.get(hwnd)
-            if prev_title is not None and prev_title != title:
-                notifications.append({
-                    "pkg": w.get("process", ""),
-                    "title": title,
-                    "text": "",
-                    "when": int(time.time() * 1000),
-                })
-
-        self._prev_titles = current_titles
-        return notifications
-
-    async def get_notifications(self) -> list[dict[str, Any]]:
-        return await asyncio.to_thread(self.get_notifications_sync)
