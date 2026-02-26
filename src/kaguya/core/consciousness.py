@@ -1,9 +1,9 @@
 """ConsciousnessScheduler — 主动意识调度器（V2 简化版）。
 
-两个后台循环：
-  1. heartbeat_loop  — 定时唤醒 AI，让她自主决定做什么
-  2. notification_loop — 轮询手机通知，有新消息时唤醒 AI
-  3. timer_loop       — 轮询到期的定时器
+三个后台循环：
+  1. heartbeat_loop    — 定时唤醒 AI，让她自主决定做什么
+  2. notification_loop — 轮询通知，有新消息时唤醒 AI
+  3. timer_loop        — 轮询到期的定时器
 """
 
 from __future__ import annotations
@@ -11,8 +11,8 @@ from __future__ import annotations
 import asyncio
 import re
 import random
-from datetime import datetime
-from typing import TYPE_CHECKING, Optional
+from datetime import datetime, timedelta
+from typing import TYPE_CHECKING, Any, Optional
 
 from loguru import logger
 
@@ -21,27 +21,32 @@ from kaguya.config import ConsciousnessConfig, NotificationsConfig, PersonaConfi
 if TYPE_CHECKING:
     from kaguya.core.engine import ChatEngine
     from kaguya.core.memory import RecursiveMemory
-    from kaguya.phone.controller import PhoneController
 
 
 class ConsciousnessScheduler:
-    """辉夜姬的自主意识调度器。"""
+    """辉夜姬的自主意识调度器。
+
+    notification_source: 任何具有 async get_notifications() -> list[dict] 的对象
+                        （如 DesktopController）。
+    """
 
     def __init__(
         self,
         engine: "ChatEngine",
         memory: "RecursiveMemory",
-        controller: Optional["PhoneController"],
-        consciousness_config: ConsciousnessConfig,
-        notifications_config: NotificationsConfig,
+        notification_source: Any | None = None,
+        consciousness_config: ConsciousnessConfig | None = None,
+        notifications_config: NotificationsConfig | None = None,
         persona: Optional[PersonaConfig] = None,
+        platform: str = "desktop",
     ):
         self.engine = engine
         self.memory = memory
-        self.controller = controller
-        self.con_cfg = consciousness_config
-        self.notif_cfg = notifications_config
+        self.notification_source = notification_source
+        self.con_cfg = consciousness_config or ConsciousnessConfig()
+        self.notif_cfg = notifications_config or NotificationsConfig()
         self.persona = persona
+        self.platform = platform
         self._last_notification_ids: set[str] = set()
 
     # ------------------------------------------------------------------
@@ -77,8 +82,8 @@ class ConsciousnessScheduler:
 
     async def notification_loop(self) -> None:
         """通知轮询循环，有新消息时唤醒 AI。"""
-        if not self.controller:
-            logger.info("未配置手机，通知轮询跳过")
+        if not self.notification_source:
+            logger.info("未配置通知源，通知轮询跳过")
             return
 
         logger.info(f"通知轮询启动: 每 {self.notif_cfg.poll_interval_seconds} 秒")
@@ -87,7 +92,7 @@ class ConsciousnessScheduler:
             try:
                 await self._check_notifications()
             except Exception as e:
-                logger.debug(f"通知检查失败（设备可能未连接）: {e}")
+                logger.debug(f"通知检查失败: {e}")
 
     async def timer_loop(self) -> None:
         """定时器检查循环，处理到期的定时器。"""
@@ -108,7 +113,7 @@ class ConsciousnessScheduler:
         prompt = await self._build_wakeup_prompt()
         logger.info("主动意识唤醒")
         reply = await self.engine.handle_consciousness(
-            prompt, trigger="heartbeat", pre_activate_groups=["phone"],
+            prompt, trigger="heartbeat", pre_activate_groups=[self.platform],
         )
 
         # 记录意识日志
@@ -116,8 +121,8 @@ class ConsciousnessScheduler:
             await self.memory.log_consciousness(reply[:200])
 
     async def _check_notifications(self) -> None:
-        """检查手机通知，有新消息通知时唤醒 AI（带防抖）。"""
-        notifications = await self.controller.get_notifications()
+        """检查通知，有新消息时唤醒 AI（带防抖）。"""
+        notifications = await self.notification_source.get_notifications()
         if not notifications:
             return
 
@@ -135,15 +140,13 @@ class ConsciousnessScheduler:
         logger.debug(f"发现 {len(new_fps)} 条新通知，开始防抖等待")
         while True:
             await asyncio.sleep(2)
-            fresh = await self.controller.get_notifications()
+            fresh = await self.notification_source.get_notifications()
             fresh = self._filter_notifications(fresh) if fresh else []
             fresh_fps = self._build_fingerprints(fresh) if fresh else set()
             if not (fresh_fps - fingerprints):
-                # 没有新增通知，防抖结束
                 notifications = fresh or notifications
                 fingerprints = fresh_fps or fingerprints
                 break
-            # 有新增，更新指纹继续等待
             logger.debug(f"防抖期间又有 {len(fresh_fps - fingerprints)} 条新通知，继续等待")
             notifications = fresh
             fingerprints = fresh_fps
@@ -159,24 +162,13 @@ class ConsciousnessScheduler:
             text = n.get("text", "")
             lines.append(f"- [{pkg}] {title}: {text}")
 
-        prompt = (
-            f"你的手机收到了 {new_count} 条新通知：\n"
-            + "\n".join(lines)
-            + "\n\n【处理方式】\n"
-            "如果要回复消息或查看详情，推荐操作流程：\n"
-            "1. 调用 phone_pull_notifications 下拉通知栏\n"
-            "2. 截图查看通知栏内容\n"
-            "3. 点击对应通知（会自动跳转到聊天/详情页面）\n"
-            "4. 在页面中操作（回复消息等）\n"
-            "注意：每次操作后记得截图确认结果，App 页面加载需要等待。\n"
-            "也可以选择暂时不处理。"
-        )
+        prompt = self._build_notification_prompt(new_count, lines)
         if self.persona:
             notif_guidelines = self.persona.get_guidelines("notification")
             if notif_guidelines:
                 prompt += f"\n\n【通知处理准则】\n{notif_guidelines}"
         reply = await self.engine.handle_consciousness(
-            prompt, trigger="notification", pre_activate_groups=["phone"],
+            prompt, trigger="notification", pre_activate_groups=[self.platform],
         )
         if reply:
             await self.memory.log_consciousness(f"[通知处理] {reply[:200]}")
@@ -187,9 +179,14 @@ class ConsciousnessScheduler:
         for timer in triggered:
             label = timer.get("label", "")
             timer_id = timer.get("id")
+            recurrence = timer.get("recurrence")
             logger.info(f"定时器触发: [{timer_id}] {label}")
 
             await self.memory.timer_delete(timer_id)
+
+            # 周期性定时器重新调度
+            if recurrence:
+                await self._reschedule_timer(label, timer, recurrence)
 
             prompt = (
                 f"你之前设置的定时器现在触发了：\n"
@@ -199,6 +196,47 @@ class ConsciousnessScheduler:
             reply = await self.engine.handle_consciousness(prompt, trigger="timer")
             if reply:
                 await self.memory.log_consciousness(f"[定时器] {label}: {reply[:200]}")
+
+    async def _reschedule_timer(
+        self, label: str, timer: dict, recurrence: str
+    ) -> None:
+        """为周期性定时器创建下一次触发。"""
+        trigger_at_str = timer.get("trigger_at", "")
+        try:
+            old_trigger = datetime.fromisoformat(trigger_at_str)
+        except (ValueError, TypeError):
+            old_trigger = datetime.now()
+
+        if recurrence == "daily":
+            delta = timedelta(days=1)
+        elif recurrence == "weekly":
+            delta = timedelta(weeks=1)
+        else:
+            logger.warning(f"未知的 recurrence 类型: {recurrence}，跳过重新调度")
+            return
+
+        next_trigger = old_trigger + delta
+        # 如果下次触发已在过去（如进程曾停机），跳到未来
+        now = datetime.now()
+        while next_trigger <= now:
+            next_trigger += delta
+
+        new_id = await self.memory.timer_set(label, next_trigger, recurrence)
+        logger.info(f"周期定时器已重新调度: [{new_id}] {label} → {next_trigger.isoformat()}")
+
+    def _build_notification_prompt(self, count: int, lines: list[str]) -> str:
+        """构建通知唤醒 prompt。"""
+        return (
+            f"你的电脑检测到 {count} 个窗口有新变化：\n"
+            + "\n".join(lines)
+            + "\n\n【处理方式】\n"
+            "如果要查看或回复消息，推荐操作流程：\n"
+            "1. 调用 desktop_focus_window 聚焦对应窗口\n"
+            "2. 截图查看窗口内容\n"
+            "3. 在窗口中操作（点击、输入回复等）\n"
+            "注意：每次操作后记得截图确认结果。\n"
+            "也可以选择暂时不处理。"
+        )
 
     async def _build_wakeup_prompt(self) -> str:
         """构建心跳唤醒 prompt。"""
@@ -229,7 +267,7 @@ class ConsciousnessScheduler:
             parts.append("待处理的定时任务：\n" + "\n".join(timer_lines))
 
         parts.append(
-            "现在由你自由决定做什么——可以查看手机通知、回复消息、上网浏览、记笔记，"
+            "现在由你自由决定做什么——可以查看桌面通知、回复消息、操作电脑、上网浏览、记笔记，"
             "或者什么都不做（直接回复「暂时不做什么」也完全OK）。"
         )
 

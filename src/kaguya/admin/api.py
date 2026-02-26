@@ -11,7 +11,6 @@
   GET  /api/timers         — 待触发定时器
   GET  /api/logs           — 最近意识日志
   GET  /api/working        — 当前工作记忆（L0）
-  GET  /api/phone/apps     — 获取手机已安装应用列表
   GET  /api/notifications/config — 获取通知配置
   POST /api/notifications/config — 保存通知配置到 user_mixin.toml
   GET  /api/debug/sessions       — 交互调试日志
@@ -24,7 +23,7 @@ import asyncio
 import base64
 import json
 from pathlib import Path
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING
 
 from aiohttp import web
 from loguru import logger
@@ -34,7 +33,6 @@ from kaguya.config import AdminConfig, AppConfig, save_user_mixin
 if TYPE_CHECKING:
     from kaguya.core.engine import ChatEngine
     from kaguya.core.memory import RecursiveMemory
-    from kaguya.phone.controller import PhoneController
 
 _STATIC_DIR = Path(__file__).parent / "static"
 
@@ -48,14 +46,12 @@ class AdminAPI:
         memory: "RecursiveMemory",
         config: AdminConfig,
         app_config: AppConfig,
-        controller: Optional["PhoneController"] = None,
         persona_name: str = "辉夜姬",
     ):
         self.engine = engine
         self.memory = memory
         self.config = config
         self.app_config = app_config
-        self.controller = controller
         self.persona_name = persona_name
         self._app = self._build_app()
 
@@ -76,8 +72,7 @@ class AdminAPI:
         app.router.add_get("/api/timers", self._timers)
         app.router.add_get("/api/logs", self._logs)
         app.router.add_get("/api/working", self._working)
-        # 手机 & 通知配置
-        app.router.add_get("/api/phone/apps", self._phone_apps)
+        # 通知配置
         app.router.add_get("/api/notifications/config", self._notif_config_get)
         app.router.add_post("/api/notifications/config", self._notif_config_set)
         # 调试日志
@@ -253,18 +248,8 @@ class AdminAPI:
         return web.json_response(self.memory.get_working_memory())
 
     # ------------------------------------------------------------------
-    # 手机 & 通知配置
+    # 通知配置
     # ------------------------------------------------------------------
-
-    async def _phone_apps(self, request: web.Request) -> web.Response:
-        """通过 ADB 获取手机已安装应用列表。"""
-        if not self.controller:
-            return web.json_response({"error": "未配置手机控制器"}, status=503)
-        try:
-            packages = await self.controller.get_installed_packages()
-            return web.json_response({"apps": sorted(packages)})
-        except Exception as e:
-            return web.json_response({"error": f"获取应用列表失败: {e}"}, status=500)
 
     async def _notif_config_get(self, request: web.Request) -> web.Response:
         """返回当前通知配置。"""

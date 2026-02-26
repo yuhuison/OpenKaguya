@@ -25,6 +25,7 @@ from kaguya.llm.client import LLMClient
 if TYPE_CHECKING:
     from kaguya.core.router import ToolRouter
     from kaguya.tools.avatar import AvatarManager
+    from kaguya.tools.task import TaskTracker
 
 MAX_TOOL_ROUNDS = 100
 
@@ -83,12 +84,14 @@ class ChatEngine:
         router: "ToolRouter",
         persona: PersonaConfig,
         avatar_manager: Optional["AvatarManager"] = None,
+        task_tracker: Optional["TaskTracker"] = None,
     ):
         self.llm = llm
         self.memory = memory
         self.router = router
         self.persona = persona
         self.avatar_manager = avatar_manager
+        self.task_tracker = task_tracker
         self._lock = asyncio.Lock()
         self.interaction_log = InteractionLogger()
 
@@ -117,16 +120,17 @@ class ChatEngine:
         trigger: str = "consciousness",
         pre_activate_groups: list[str] | None = None,
     ) -> str:
-        """主动意识唤醒入口（无锁，由 ConsciousnessScheduler 调用）。"""
-        sid = self.interaction_log.start_session(trigger)
-        self.interaction_log.log(sid, "system", prompt[:500])
-        try:
-            return await self._process(
-                prompt, sender_name="[系统唤醒]", session_id=sid,
-                pre_activate_groups=pre_activate_groups,
-            )
-        finally:
-            self.interaction_log.end_session(sid)
+        """主动意识唤醒入口（加锁，防止与 handle_message 并发冲突）。"""
+        async with self._lock:
+            sid = self.interaction_log.start_session(trigger)
+            self.interaction_log.log(sid, "system", prompt[:500])
+            try:
+                return await self._process(
+                    prompt, sender_name="[系统唤醒]", session_id=sid,
+                    pre_activate_groups=pre_activate_groups,
+                )
+            finally:
+                self.interaction_log.end_session(sid)
 
     # ------------------------------------------------------------------
     # 内部处理
@@ -183,7 +187,51 @@ class ChatEngine:
 
         messages += history
 
-        # 4. 多轮工具调用循环
+        # 4. 多轮工具调用循环（含任务续发）
+        reply = ""
+        if self.task_tracker:
+            self.task_tracker.reset()
+        continuation_count = 0
+
+        while True:
+            reply = await self._tool_loop(messages, session_id, on_event)
+
+            # 任务完成检查：如果没有 task_tracker 或任务已完成，正常退出
+            if not self.task_tracker or not self.task_tracker.needs_continuation():
+                break
+
+            # 任务未完成，拼接续发消息
+            continuation_count += 1
+            tracker = self.task_tracker
+            continuation_msg = (
+                f"【系统提醒】你之前声明了任务「{tracker.task_name}」"
+                f"（目标：{tracker.task_goal}），"
+                f"当前进度：{tracker.status or '未更新'}。\n"
+                f"该任务尚未完成（第 {continuation_count} 次提醒）。"
+                f"请继续执行，或者如果确实无法完成，"
+                f"请调用 mark_current_task_done(interrupted=true) 标记为中断。"
+            )
+            messages.append({"role": "user", "content": continuation_msg})
+            self.interaction_log.log(
+                session_id, "task_continuation",
+                f"任务未完成，第 {continuation_count} 次续发",
+            )
+            logger.info(f"任务「{tracker.task_name}」未完成，第 {continuation_count} 次续发")
+
+        # 4. 更新记忆
+        await self.memory.add_message("user", f"{sender_name}: {content}")
+        if reply:
+            await self.memory.add_message("assistant", reply)
+
+        return reply
+
+    async def _tool_loop(
+        self,
+        messages: list[dict[str, Any]],
+        session_id: str | None = None,
+        on_event=None,
+    ) -> str:
+        """执行多轮工具调用循环，返回最终文字回复。"""
         reply = ""
         for _ in range(MAX_TOOL_ROUNDS):
             # 每轮重新获取（gateway 可能刚激活新组）
@@ -202,7 +250,6 @@ class ChatEngine:
             content_text = re.sub(r"</?think>", "", raw_content).strip()
 
             if not tool_calls:
-                # 没有工具调用，直接返回文字回复
                 reply = content_text
                 if reply:
                     self.interaction_log.log(session_id, "ai_text", reply)
@@ -222,9 +269,14 @@ class ChatEngine:
 
                 args_str = json.dumps(tool_args, ensure_ascii=False)
                 logger.info(f"工具调用: {tool_name}({args_str})")
-                self.interaction_log.log(session_id, "tool_call", f"{tool_name}({args_str})")
+                self.interaction_log.log(
+                    session_id, "tool_call", f"{tool_name}({args_str})",
+                )
                 if on_event:
-                    await on_event({"type": "tool_call", "id": tool_id, "name": tool_name, "args": tool_args})
+                    await on_event({
+                        "type": "tool_call", "id": tool_id,
+                        "name": tool_name, "args": tool_args,
+                    })
 
                 result = await self.router.execute_tool(tool_name, tool_args)
 
@@ -235,30 +287,31 @@ class ChatEngine:
                 result_log = json.dumps(log_result, ensure_ascii=False)
                 if len(result_log) > 1000:
                     result_log = result_log[:1000] + "..."
-                self.interaction_log.log(session_id, "tool_result", result_log, tool_name=tool_name)
+                self.interaction_log.log(
+                    session_id, "tool_result", result_log, tool_name=tool_name,
+                )
                 if on_event:
                     ev: dict = {"type": "tool_result", "id": tool_id, "name": tool_name}
                     if "image_base64" in result:
                         ev["image_base64"] = result["image_base64"]
-                        ev["image_media_type"] = result.get("image_media_type", "image/jpeg")
+                        ev["image_media_type"] = result.get(
+                            "image_media_type", "image/jpeg",
+                        )
                         ev["text"] = result.get("text", "")
                     else:
                         ev["text"] = result_log
                     await on_event(ev)
 
                 # 构建工具结果消息（可能包含图像）
-                tool_messages = self._build_tool_result_messages(tool_id, tool_name, result)
+                tool_messages = self._build_tool_result_messages(
+                    tool_id, tool_name, result,
+                )
                 messages.extend(tool_messages)
         else:
             # 超过最大轮数
             logger.warning(f"超过最大工具调用轮数 ({MAX_TOOL_ROUNDS})")
             if not reply:
                 reply = "（处理超时，请稍后再试）"
-
-        # 4. 更新记忆
-        await self.memory.add_message("user", f"{sender_name}: {content}")
-        if reply:
-            await self.memory.add_message("assistant", reply)
 
         return reply
 

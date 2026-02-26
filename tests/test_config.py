@@ -9,7 +9,7 @@ def test_load_default_config(tmp_path):
     assert isinstance(cfg, AppConfig)
     assert cfg.persona.name == "辉夜姬"
     assert cfg.memory.working_memory_size == 50
-    assert cfg.phone.adb_path == "adb"
+    assert cfg.desktop.enabled is True
 
 
 def test_load_with_toml(tmp_path):

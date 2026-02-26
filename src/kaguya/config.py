@@ -42,13 +42,6 @@ class LLMConfig:
 
 
 @dataclass
-class PhoneConfig:
-    adb_path: str = "adb"
-    device_serial: str = ""
-    screenshot_scale: float = 0.5
-
-
-@dataclass
 class MemoryConfig:
     working_memory_size: int = 50
     l1_max: int = 100
@@ -58,6 +51,10 @@ class MemoryConfig:
     l3_max_tokens: int = 2000
     inject_l1_count: int = 10
     inject_l2_count: int = 5
+    max_consciousness_logs: int = 200
+    max_notes: int = 30
+    max_note_length: int = 500
+    inject_consciousness_count: int = 5
 
 
 @dataclass
@@ -121,6 +118,13 @@ class ImageConfig:
 
 
 @dataclass
+class DesktopConfig:
+    enabled: bool = True
+    screenshot_scale: float = 0.5  # 截图缩放比例
+    grid_size: int = 120           # 网格间距（可调大以适配高分屏）
+
+
+@dataclass
 class BrowserConfig:
     enabled: bool = False
     mode: str = "local"            # "cdp" | "local" | "cloud"
@@ -134,7 +138,6 @@ class BrowserConfig:
 @dataclass
 class AppConfig:
     llm: LLMConfig = field(default_factory=LLMConfig)
-    phone: PhoneConfig = field(default_factory=PhoneConfig)
     memory: MemoryConfig = field(default_factory=MemoryConfig)
     consciousness: ConsciousnessConfig = field(default_factory=ConsciousnessConfig)
     notifications: NotificationsConfig = field(default_factory=NotificationsConfig)
@@ -142,6 +145,7 @@ class AppConfig:
     persona: PersonaConfig = field(default_factory=PersonaConfig)
     image: ImageConfig = field(default_factory=ImageConfig)
     browser: BrowserConfig = field(default_factory=BrowserConfig)
+    desktop: DesktopConfig = field(default_factory=DesktopConfig)
 
     # 运行时状态：指向 user_mixin.toml 的路径
     _mixin_path: str = ""
@@ -245,14 +249,6 @@ def load_config(config_dir: str | Path | None = None, data_dir: str | Path | Non
         summarizer_raw["api_key"] = api_keys.get("summarizer", api_keys.get("secondary", ""))
     cfg.llm.summarizer = _parse_llm_model(summarizer_raw)
 
-    # ── Phone ─────────────────────────────────────────────────────────────
-    phone_raw = raw.get("phone", {})
-    cfg.phone = PhoneConfig(
-        adb_path=phone_raw.get("adb_path", "adb"),
-        device_serial=phone_raw.get("device_serial", ""),
-        screenshot_scale=float(phone_raw.get("screenshot_scale", 0.5)),
-    )
-
     # ── Memory ────────────────────────────────────────────────────────────
     mem_raw = raw.get("memory", {})
     cfg.memory = MemoryConfig(
@@ -264,6 +260,10 @@ def load_config(config_dir: str | Path | None = None, data_dir: str | Path | Non
         l3_max_tokens=int(mem_raw.get("l3_max_tokens", 2000)),
         inject_l1_count=int(mem_raw.get("inject_l1_count", 10)),
         inject_l2_count=int(mem_raw.get("inject_l2_count", 5)),
+        max_consciousness_logs=int(mem_raw.get("max_consciousness_logs", 200)),
+        max_notes=int(mem_raw.get("max_notes", 30)),
+        max_note_length=int(mem_raw.get("max_note_length", 500)),
+        inject_consciousness_count=int(mem_raw.get("inject_consciousness_count", 5)),
     )
 
     # ── Consciousness ─────────────────────────────────────────────────────
@@ -317,6 +317,14 @@ def load_config(config_dir: str | Path | None = None, data_dir: str | Path | Non
         browser_path=browser_raw.get("browser_path", ""),
         cloud_api_key=browser_api_key,
         cloud_timeout=int(browser_raw.get("cloud_timeout", 15)),
+    )
+
+    # ── Desktop ─────────────────────────────────────────────────────────────
+    desktop_raw = raw.get("desktop", {})
+    cfg.desktop = DesktopConfig(
+        enabled=bool(desktop_raw.get("enabled", True)),
+        screenshot_scale=float(desktop_raw.get("screenshot_scale", 0.5)),
+        grid_size=int(desktop_raw.get("grid_size", 120)),
     )
 
     # ── Persona ───────────────────────────────────────────────────────────

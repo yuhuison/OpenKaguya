@@ -618,7 +618,7 @@ html, body {
           <div class="card">
             <div class="fetch-row">
               <button class="btn-fetch" id="fetchAppsBtn" onclick="fetchApps()">
-                <span id="fetchIcon">📲</span> 从手机获取应用列表
+                <span id="fetchIcon">🖥️</span> 获取窗口进程列表
               </button>
               <span class="fetch-status" id="fetchStatus"></span>
             </div>
@@ -1042,20 +1042,17 @@ async function fetchApps() {
   const icon = document.getElementById('fetchIcon');
   btn.disabled = true;
   icon.innerHTML = '<span class="spin">⟳</span>';
-  status.textContent = '正在获取...';
+  status.textContent = '桌面模式下请手动输入进程名（如 WeChat.exe）';
   try {
-    const res = await fetch('/api/phone/apps', { headers: authHeaders() });
-    const data = await res.json();
-    if (data.error) throw new Error(data.error);
-    allApps = [...new Set([...data.apps, ...watchApps])].sort();
+    allApps = [...new Set([...watchApps])].sort();
     renderAppGrid();
-    status.textContent = `共 ${data.apps.length} 个应用`;
-    toast(`获取到 ${data.apps.length} 个应用`);
+    status.textContent = `已加载 ${allApps.length} 个进程`;
+    toast('桌面模式：请手动添加进程名');
   } catch (e) {
-    status.textContent = '获取失败';
+    status.textContent = '加载失败';
     toast(e.message, 'error');
   } finally {
-    btn.disabled = false; icon.textContent = '📲';
+    btn.disabled = false; icon.textContent = '🖥️';
   }
 }
 

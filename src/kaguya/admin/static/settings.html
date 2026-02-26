@@ -373,7 +373,7 @@ body {
     <div class="card">
       <div class="fetch-row">
         <button class="btn-fetch" id="fetchAppsBtn" onclick="fetchApps('watch')">
-          <span id="fetchIcon">📲</span> 从手机获取应用列表
+          <span id="fetchIcon">🖥️</span> 获取窗口进程列表
         </button>
         <span class="fetch-status" id="fetchStatus"></span>
       </div>
@@ -468,24 +468,22 @@ async function loadConfig() {
   }
 }
 
-// ── Fetch apps from phone ──
+// ── Fetch apps (manual input for desktop mode) ──
 async function fetchApps() {
   const btn = document.getElementById('fetchAppsBtn');
   const status = document.getElementById('fetchStatus');
   const icon = document.getElementById('fetchIcon');
   btn.disabled = true;
   icon.innerHTML = '<span class="spin">⟳</span>';
-  status.textContent = '正在获取...';
+  status.textContent = '桌面模式下请手动输入进程名（如 WeChat.exe）';
 
   try {
-    const res = await fetch('/api/phone/apps', { headers: headers() });
-    const data = await res.json();
-    if (data.error) throw new Error(data.error);
-    allApps = [...new Set([...data.apps, ...watchApps, ...ignoreApps])].sort();
+    // 桌面模式：无需从设备获取，直接使用已配置的列表
+    allApps = [...new Set([...watchApps, ...ignoreApps])].sort();
     renderAppGrid('watch');
     renderAppGrid('ignore');
-    status.textContent = `共 ${data.apps.length} 个应用`;
-    toast(`获取到 ${data.apps.length} 个应用`);
+    status.textContent = `已加载 ${allApps.length} 个进程`;
+    toast('桌面模式：请手动添加进程名');
   } catch (e) {
     status.textContent = '获取失败';
     toast(e.message, 'error');

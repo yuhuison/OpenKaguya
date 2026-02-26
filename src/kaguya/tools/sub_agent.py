@@ -19,7 +19,7 @@ from loguru import logger
 ALWAYS_BLOCKED = {
     "run_sub_agent",   # 防递归
     "set_avatar",      # 子 Agent 不应改形象
-    "use_phone",       # 子 Agent 已有所有工具，不需要 gateway
+    "use_desktop",     # 子 Agent 已有所有工具，不需要 gateway
     "use_browser",     # 同上
 }
 
@@ -48,7 +48,7 @@ SUB_AGENT_TOOLS: list[dict] = [
         "function": {
             "name": "run_sub_agent",
             "description": (
-                "启动子 Agent 来执行复杂任务。子 Agent 可以使用手机工具、文件操作等。"
+                "启动子 Agent 来执行复杂任务。子 Agent 可以使用桌面工具、文件操作等。"
                 "适合耗时较长或需要多步操作的任务（如搜索信息、处理文件等）。"
             ),
             "parameters": {

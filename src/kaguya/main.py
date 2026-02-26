@@ -1,6 +1,6 @@
 """OpenKaguya v2 — 启动入口。
 
-核心理念：给 AI 一部手机，它就能做一切。
+核心理念：给 AI 一台电脑，它就能做一切。
 """
 
 from __future__ import annotations
@@ -20,15 +20,16 @@ from kaguya.core.engine import ChatEngine
 from kaguya.core.memory import RecursiveMemory
 from kaguya.core.router import GatewayDef, ToolGroup, ToolRouter
 from kaguya.llm.client import LLMClient
-from kaguya.phone.controller import PhoneController
-from kaguya.phone.screen import ScreenReader
-from kaguya.phone.tools import PHONE_TOOLS, PhoneToolExecutor
+from kaguya.desktop.controller import DesktopController
+from kaguya.desktop.screen import DesktopScreenReader
+from kaguya.desktop.tools import DESKTOP_TOOLS, DesktopToolExecutor
 from kaguya.tools.avatar import AVATAR_TOOLS, AvatarManager, AvatarToolExecutor
 from kaguya.tools.browser import BROWSER_TOOLS, BrowserToolExecutor
 from kaguya.tools.common import COMMON_TOOLS, CommonToolExecutor
 from kaguya.tools.image import IMAGE_TOOLS, ImageToolExecutor
 from kaguya.tools.notes import NOTES_TOOLS, NotesToolExecutor
 from kaguya.tools.sub_agent import SUB_AGENT_TOOLS, SubAgentToolExecutor
+from kaguya.tools.task import TASK_TOOLS, TaskToolExecutor, TaskTracker
 from kaguya.tools.workspace import WORKSPACE_TOOLS, WorkspaceManager, WorkspaceToolExecutor
 
 
@@ -65,10 +66,12 @@ async def async_main() -> None:
     # ── Workspace ────────────────────────────────────────────────────
     workspace_mgr = WorkspaceManager(data_dir / "workspaces")
 
-    # ── 手机控制 ──────────────────────────────────────────────────────
-    controller = PhoneController(config.phone)
-    screen_reader = ScreenReader(controller, config.phone.screenshot_scale)
-    phone_executor = PhoneToolExecutor(controller, screen_reader, workspace=workspace_mgr)
+    # ── 桌面控制 ──────────────────────────────────────────────────────
+    desktop_controller = DesktopController()
+    desktop_screen_reader = DesktopScreenReader(
+        desktop_controller, config.desktop.screenshot_scale, config.desktop.grid_size,
+    )
+    desktop_executor = DesktopToolExecutor(desktop_controller, desktop_screen_reader)
 
     # ── Avatar ────────────────────────────────────────────────────────
     avatar_mgr = AvatarManager(workspace_mgr.kaguya_dir, config_dir)
@@ -81,22 +84,26 @@ async def async_main() -> None:
     workspace_executor = WorkspaceToolExecutor(workspace_mgr)
     avatar_executor = AvatarToolExecutor(avatar_mgr, workspace_mgr)
     image_executor = ImageToolExecutor(config.image, workspace_mgr)
+    task_tracker = TaskTracker()
+    task_executor = TaskToolExecutor(task_tracker)
 
     # 基础组（始终可见）
     router.register_group(ToolGroup("notes", NOTES_TOOLS, notes_executor, is_base=True))
     router.register_group(ToolGroup("common", COMMON_TOOLS, common_executor, is_base=True))
+    router.register_group(ToolGroup("task", TASK_TOOLS, task_executor, is_base=True))
     router.register_group(ToolGroup("workspace", WORKSPACE_TOOLS, workspace_executor, is_base=True))
     router.register_group(ToolGroup("avatar", AVATAR_TOOLS, avatar_executor, is_base=True))
     router.register_group(ToolGroup("image", IMAGE_TOOLS, image_executor, is_base=True))
 
-    # 门控组：手机工具
-    router.register_group(ToolGroup("phone", PHONE_TOOLS, phone_executor, is_base=False))
-    router.register_gateway(GatewayDef(
-        tool_name="use_phone",
-        activates="phone",
-        description="激活手机工具组。调用后可以截图、点击、滑动、输入等操控手机。需要操作手机时请先调用。",
-        result_message="手机工具已解锁，你现在可以使用所有手机操作工具了。",
-    ))
+    # 门控组：桌面工具
+    if config.desktop.enabled:
+        router.register_group(ToolGroup("desktop", DESKTOP_TOOLS, desktop_executor, is_base=False))
+        router.register_gateway(GatewayDef(
+            tool_name="use_desktop",
+            activates="desktop",
+            description="激活桌面操作工具组。调用后可截图、点击、输入等操控电脑桌面。需要操作电脑时请先调用。",
+            result_message="桌面工具已解锁，你现在可以使用所有桌面操作工具了。",
+        ))
 
     # 门控组：浏览器（可选）
     browser_executor = None
@@ -128,16 +135,18 @@ async def async_main() -> None:
         router=router,
         persona=config.persona,
         avatar_manager=avatar_mgr,
+        task_tracker=task_tracker,
     )
 
     # ── 意识调度器 ────────────────────────────────────────────────────
     consciousness = ConsciousnessScheduler(
         engine=engine,
         memory=memory,
-        controller=controller,
+        notification_source=desktop_controller if config.desktop.enabled else None,
         consciousness_config=config.consciousness,
         notifications_config=config.notifications,
         persona=config.persona,
+        platform="desktop",
     )
 
     # ── 后台任务 ──────────────────────────────────────────────────────
@@ -147,7 +156,6 @@ async def async_main() -> None:
         admin = AdminAPI(
             engine, memory, config.admin,
             app_config=config,
-            controller=controller,
             persona_name=config.persona.name,
         )
         tasks.append(asyncio.create_task(admin.start()))

@@ -1,9 +1,14 @@
-"""tools/browser.py — 浏览器原子操作工具集（基于 browser-use Browser API）。
+"""tools/browser.py — 浏览器原子操作工具集（基于 Playwright + Stealth）。
 
 提供一整套浏览器元操作，让 AI 自己看截图、做决策，
-类似手机工具的模式（截图 → 判断 → 操作）。
+类似桌面工具的模式（截图 → 判断 → 操作）。
 
-所有重依赖（browser-use, playwright）均为懒导入。
+反检测策略：
+  1. 优先使用系统 Chrome（channel="chrome"）
+  2. 注入 stealth JS 抹除自动化指纹
+  3. 反自动化启动参数
+
+所有重依赖（playwright）均为懒导入。
 """
 
 from __future__ import annotations
@@ -19,6 +24,87 @@ from loguru import logger
 
 if TYPE_CHECKING:
     from kaguya.config import BrowserConfig
+
+
+# ---------------------------------------------------------------------------
+# Stealth JS — 注入到每个页面，抹除自动化指纹
+# ---------------------------------------------------------------------------
+
+_STEALTH_JS = """\
+// --- navigator.webdriver ---
+Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+
+// --- chrome.runtime ---
+window.chrome = window.chrome || {};
+window.chrome.runtime = { id: undefined };
+
+// --- navigator.plugins（模拟真实 Chrome 插件列表）---
+Object.defineProperty(navigator, 'plugins', {
+    get: () => {
+        const plugins = [
+            { name: 'Chrome PDF Plugin', filename: 'internal-pdf-viewer',
+              description: 'Portable Document Format' },
+            { name: 'Chrome PDF Viewer', filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai',
+              description: '' },
+            { name: 'Native Client', filename: 'internal-nacl-plugin',
+              description: '' },
+        ];
+        plugins.length = 3;
+        return plugins;
+    }
+});
+
+// --- navigator.languages ---
+Object.defineProperty(navigator, 'languages', {
+    get: () => ['zh-CN', 'zh', 'en-US', 'en']
+});
+
+// --- permissions.query ---
+const originalQuery = window.navigator.permissions.query;
+window.navigator.permissions.query = (params) =>
+    params.name === 'notifications'
+        ? Promise.resolve({ state: Notification.permission })
+        : originalQuery(params);
+
+// --- WebGL 渲染器伪装 ---
+const getParameter = WebGLRenderingContext.prototype.getParameter;
+WebGLRenderingContext.prototype.getParameter = function(param) {
+    if (param === 37445) return 'Intel Inc.';          // UNMASKED_VENDOR_WEBGL
+    if (param === 37446) return 'Intel Iris OpenGL Engine';  // UNMASKED_RENDERER_WEBGL
+    return getParameter.call(this, param);
+};
+
+// --- iframe contentWindow ---
+try {
+    const elementDescriptor = Object.getOwnPropertyDescriptor(
+        HTMLIFrameElement.prototype, 'contentWindow'
+    );
+    if (elementDescriptor) {
+        Object.defineProperty(HTMLIFrameElement.prototype, 'contentWindow', {
+            get: function() {
+                const win = elementDescriptor.get.call(this);
+                if (win) {
+                    try {
+                        Object.defineProperty(win.navigator, 'webdriver', {
+                            get: () => undefined
+                        });
+                    } catch(e) {}
+                }
+                return win;
+            }
+        });
+    }
+} catch(e) {}
+"""
+
+# 反自动化 Chromium 启动参数
+_STEALTH_ARGS = [
+    "--disable-blink-features=AutomationControlled",
+    "--disable-infobars",
+    "--no-first-run",
+    "--no-default-browser-check",
+    "--disable-component-update",
+]
 
 
 # ---------------------------------------------------------------------------
@@ -64,7 +150,9 @@ BROWSER_TOOLS: list[dict] = [
                 "properties": {
                     "selector": {
                         "type": "string",
-                        "description": "CSS 选择器，如 'button.submit'、'a[href]'、'#login-btn'",
+                        "description": (
+                            "CSS 选择器，如 'button.submit'、'a[href]'、'#login-btn'"
+                        ),
                     },
                 },
                 "required": ["selector"],
@@ -79,7 +167,10 @@ BROWSER_TOOLS: list[dict] = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "selector": {"type": "string", "description": "输入框的 CSS 选择器"},
+                    "selector": {
+                        "type": "string",
+                        "description": "输入框的 CSS 选择器",
+                    },
                     "text": {"type": "string", "description": "要输入的文本"},
                 },
                 "required": ["selector", "text"],
@@ -167,24 +258,28 @@ _TOOL_NAMES = {t["function"]["name"] for t in BROWSER_TOOLS}
 
 
 class BrowserToolExecutor:
-    """浏览器原子操作执行器。
+    """浏览器原子操作执行器（Playwright + Stealth）。
 
-    惰性初始化：首次调用时才导入 browser-use 并创建 Browser 实例。
-    Browser 实例在工具调用之间保持存活，直到 browser_close 或 close()。
+    惰性初始化：首次调用时才导入 playwright 并启动浏览器。
+    反检测策略：系统 Chrome + stealth JS + 反自动化启动参数。
     """
 
     def __init__(self, browser_config: "BrowserConfig", screenshot_dir: Path):
         self.browser_config = browser_config
         self.screenshot_dir = screenshot_dir
         self.screenshot_dir.mkdir(parents=True, exist_ok=True)
-        self._browser = None  # browser_use.Browser (lazy)
-        self._page = None     # browser_use Page
+        self._playwright = None   # playwright 实例
+        self._browser = None      # Playwright Browser
+        self._context = None      # BrowserContext（注入 stealth）
+        self._page = None         # 当前 Page
 
     async def execute(self, tool_name: str, args: dict[str, Any]) -> dict[str, Any]:
         if tool_name not in _TOOL_NAMES:
             return {"error": f"未知工具: {tool_name}"}
         if not self.browser_config.enabled:
-            return {"error": "浏览器功能未启用，请在配置中设置 [browser] enabled = true"}
+            return {
+                "error": "浏览器功能未启用，请在配置中设置 [browser] enabled = true",
+            }
         try:
             handler = getattr(self, f"_do_{tool_name.removeprefix('browser_')}")
             return await handler(args)
@@ -196,62 +291,79 @@ class BrowserToolExecutor:
     # 浏览器生命周期
     # ------------------------------------------------------------------
 
-    async def _ensure_browser(self):
-        """惰性创建 browser-use Browser 实例。"""
+    async def _ensure_browser(self) -> None:
+        """惰性启动 Playwright + 浏览器（含 stealth 配置）。"""
         if self._browser is not None:
             return
 
-        from browser_use import Browser
+        from playwright.async_api import async_playwright
+
+        self._playwright = await async_playwright().start()
 
         mode = self.browser_config.mode
-        kwargs: dict[str, Any] = {}
 
         if mode == "cdp" and self.browser_config.cdp_url:
-            kwargs["cdp_url"] = self.browser_config.cdp_url
-        elif mode == "local":
-            kwargs["headless"] = self.browser_config.headless
+            # CDP 模式：连接已运行的浏览器，天然无自动化痕迹
+            self._browser = await self._playwright.chromium.connect_over_cdp(
+                self.browser_config.cdp_url,
+            )
+            # CDP 连接后使用已有 context
+            contexts = self._browser.contexts
+            if contexts:
+                self._context = contexts[0]
+            else:
+                self._context = await self._browser.new_context()
+            logger.info(f"浏览器已连接 (CDP: {self.browser_config.cdp_url})")
+        else:
+            # 本地启动模式：系统 Chrome + stealth 参数
+            launch_kwargs: dict[str, Any] = {
+                "headless": self.browser_config.headless,
+                "args": _STEALTH_ARGS,
+            }
+            # 优先用系统 Chrome
             if self.browser_config.browser_path:
-                kwargs["executable_path"] = self.browser_config.browser_path
-        elif mode == "cloud":
-            if self.browser_config.cloud_api_key:
-                import os
-                os.environ["BROWSER_USE_API_KEY"] = self.browser_config.cloud_api_key
-                kwargs["use_cloud"] = True
-            elif self.browser_config.cdp_url:
-                kwargs["cdp_url"] = self.browser_config.cdp_url
+                launch_kwargs["executable_path"] = self.browser_config.browser_path
+            else:
+                launch_kwargs["channel"] = "chrome"
 
-        self._browser = Browser(**kwargs)
-        await self._browser.start()
-        logger.info(f"浏览器已启动 (模式: {mode})")
+            self._browser = await self._playwright.chromium.launch(**launch_kwargs)
+            # 创建 context 并注入 stealth
+            self._context = await self._browser.new_context(
+                user_agent=(
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/131.0.0.0 Safari/537.36"
+                ),
+                locale="zh-CN",
+            )
+            logger.info(f"浏览器已启动 (模式: {mode}, stealth: on)")
+
+        # 注入 stealth JS 到所有页面（包括后续新建的页面）
+        await self._context.add_init_script(_STEALTH_JS)
 
     async def _ensure_page(self):
         """确保有一个活跃的页面。"""
         await self._ensure_browser()
-        if self._page is None:
-            self._page = await self._browser.new_page("about:blank")
+        if self._page is None or self._page.is_closed():
+            self._page = await self._context.new_page()
         return self._page
 
-    async def _get_current_page(self):
-        """获取当前页面。"""
-        await self._ensure_browser()
-        try:
-            page = await self._browser.get_current_page()
-            if page:
-                self._page = page
-                return page
-        except Exception:
-            pass
-        return await self._ensure_page()
-
     async def close(self) -> None:
-        """关闭浏览器实例。"""
+        """关闭浏览器和 Playwright 实例。"""
         if self._browser is not None:
             try:
-                await self._browser.stop()
+                await self._browser.close()
             except Exception as e:
                 logger.warning(f"关闭浏览器时出错: {e}")
             self._browser = None
+            self._context = None
             self._page = None
+        if self._playwright is not None:
+            try:
+                await self._playwright.stop()
+            except Exception as e:
+                logger.warning(f"关闭 Playwright 时出错: {e}")
+            self._playwright = None
 
     # ------------------------------------------------------------------
     # 各工具实现
@@ -260,43 +372,22 @@ class BrowserToolExecutor:
     async def _do_open(self, args: dict) -> dict[str, Any]:
         url = args["url"]
         page = await self._ensure_page()
-        await page.goto(url)
-
-        # 刷新 page 引用（cloud 模式下 goto 后可能切换了内部 tab）
-        try:
-            fresh = await self._browser.get_current_page()
-            if fresh:
-                self._page = fresh
-                page = fresh
-        except Exception:
-            pass
-
-        # 等待页面加载
-        for _ in range(30):
-            try:
-                current_url = await page.get_url()
-                if current_url and current_url != "about:blank":
-                    break
-            except Exception:
-                pass
-            await asyncio.sleep(0.5)
-
-        await asyncio.sleep(2)
-        title = await page.get_title()
-        current_url = await page.get_url()
-        return {"message": f"已打开页面: {title}", "url": current_url}
+        await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+        await asyncio.sleep(1)
+        title = await page.title()
+        return {"message": f"已打开页面: {title}", "url": page.url}
 
     async def _do_search(self, args: dict) -> dict[str, Any]:
         query = args["query"]
         url = f"https://www.google.com/search?q={quote(query)}"
         page = await self._ensure_page()
-        await page.goto(url)
-        await asyncio.sleep(2)
+        await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+        await asyncio.sleep(1)
 
-        title = await page.get_title()
+        title = await page.title()
         try:
             text = await page.evaluate(
-                "() => document.body.innerText.substring(0, 3000)"
+                "() => document.body.innerText.substring(0, 3000)",
             )
             return {"message": f"搜索结果: {title}", "text": text[:2000]}
         except Exception:
@@ -304,63 +395,48 @@ class BrowserToolExecutor:
 
     async def _do_click(self, args: dict) -> dict[str, Any]:
         selector = args["selector"]
-        page = await self._get_current_page()
-        elements = await page.get_elements_by_css_selector(selector)
-        if not elements:
+        page = await self._ensure_page()
+        element = await page.query_selector(selector)
+        if not element:
             return {"error": f"未找到匹配 '{selector}' 的元素"}
-        await elements[0].click()
+        await element.click()
         await asyncio.sleep(1)
         return {"message": f"已点击元素: {selector}"}
 
     async def _do_type(self, args: dict) -> dict[str, Any]:
         selector = args["selector"]
         text = args["text"]
-        page = await self._get_current_page()
-        elements = await page.get_elements_by_css_selector(selector)
-        if not elements:
+        page = await self._ensure_page()
+        element = await page.query_selector(selector)
+        if not element:
             return {"error": f"未找到匹配 '{selector}' 的输入框"}
-        await elements[0].fill(text)
+        await element.fill(text)
         return {"message": f"已在 '{selector}' 中输入: {text}"}
 
     async def _do_scroll(self, args: dict) -> dict[str, Any]:
         direction = args.get("direction", "down")
         pixels = args.get("pixels", 500)
-        page = await self._get_current_page()
+        page = await self._ensure_page()
         y = pixels if direction == "down" else -pixels
         await page.evaluate(f"() => window.scrollBy(0, {y})")
         label = "下" if direction == "down" else "上"
         return {"message": f"已向{label}滚动 {pixels} 像素"}
 
     async def _do_screenshot(self, _args: dict) -> dict[str, Any]:
-        page = await self._get_current_page()
+        page = await self._ensure_page()
 
-        try:
-            current_url = await page.get_url()
-            if current_url and current_url != "about:blank":
-                await asyncio.sleep(1)
-        except Exception:
-            pass
+        if page.url != "about:blank":
+            await asyncio.sleep(0.5)
 
-        screenshot_data = await page.screenshot(format="png")
+        raw_bytes = await page.screenshot(type="png")
+        b64_str = base64.b64encode(raw_bytes).decode()
 
-        if isinstance(screenshot_data, bytes):
-            raw_bytes = screenshot_data
-            b64_str = base64.b64encode(raw_bytes).decode()
-        else:
-            b64_str = screenshot_data
-            raw_bytes = base64.b64decode(b64_str)
-
-        # 保存到 workspace（AI 后续可通过 phone_push_file 发到手机）
+        # 保存到 workspace
         filename = f"browser_{int(time.time())}.png"
         filepath = self.screenshot_dir / filename
         filepath.write_bytes(raw_bytes)
 
-        title = ""
-        try:
-            title = await page.get_title()
-        except Exception:
-            pass
-
+        title = await page.title()
         msg = f"截图已保存: screenshots/{filename}"
         if title:
             msg = f"当前页面: {title}\n{msg}"
@@ -372,25 +448,24 @@ class BrowserToolExecutor:
         }
 
     async def _do_get_text(self, _args: dict) -> dict[str, Any]:
-        page = await self._get_current_page()
+        page = await self._ensure_page()
         text = await page.evaluate(
-            "() => document.body.innerText.substring(0, 5000)"
+            "() => document.body.innerText.substring(0, 5000)",
         )
-        title = await page.get_title()
-        url = await page.get_url()
-        return {"message": f"页面: {title}\nURL: {url}", "text": text[:3000]}
+        title = await page.title()
+        return {"message": f"页面: {title}\nURL: {page.url}", "text": text[:3000]}
 
     async def _do_back(self, _args: dict) -> dict[str, Any]:
-        page = await self._get_current_page()
+        page = await self._ensure_page()
         await page.go_back()
         await asyncio.sleep(1)
-        title = await page.get_title()
+        title = await page.title()
         return {"message": f"已后退到: {title}"}
 
     async def _do_keys(self, args: dict) -> dict[str, Any]:
         keys = args["keys"]
-        page = await self._get_current_page()
-        await page.press(keys)
+        page = await self._ensure_page()
+        await page.keyboard.press(keys)
         return {"message": f"已发送按键: {keys}"}
 
     async def _do_close(self, _args: dict) -> dict[str, Any]:

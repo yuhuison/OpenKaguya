@@ -1,6 +1,6 @@
 """core/router.py — 工具路由器：按需激活工具组，节省 token。
 
-Gateway 工具（use_phone / use_browser）调用后解锁对应工具组，
+Gateway 工具（use_desktop / use_browser）调用后解锁对应工具组，
 该组工具在当前对话轮次内持续可见。
 基础工具（笔记、定时器、图片等）始终可见。
 """
@@ -27,8 +27,8 @@ class ToolGroup:
 class GatewayDef:
     """Gateway 工具定义：调用后激活对应的 gated group。"""
 
-    tool_name: str              # e.g. "use_phone"
-    activates: str              # group name, e.g. "phone"
+    tool_name: str              # e.g. "use_desktop"
+    activates: str              # group name, e.g. "desktop"
     description: str            # 工具描述（给 LLM 看）
     result_message: str         # 激活后返回给 LLM 的消息
 

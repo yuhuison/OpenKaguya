@@ -1,27 +1,26 @@
-"""ScreenReader — 屏幕理解模块（V2 纯视觉版）。
+"""DesktopScreenReader — 桌面屏幕理解模块。
 
-将手机屏幕转化为 AI 能理解的信息：
+网格标注方案：
   1. 截图并缩放
   2. 覆盖全屏编号圆圈标记点（行优先，从左到右、从上到下）
   3. AI 通过视觉理解截图内容，用编号 + 偏移量定位点击
-
-截图工具会返回网格间距，AI 可据此估算偏移量。
 """
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 
 from PIL import Image, ImageDraw, ImageFont
 
-from kaguya.phone.controller import PhoneController
+from kaguya.desktop.controller import DesktopController
 
 
 # ---------------------------------------------------------------------------
 # 数据模型
 # ---------------------------------------------------------------------------
 
-GRID_SIZE = 120  # 网格间距（原始分辨率像素）
+DEFAULT_GRID_SIZE = 120
 
 
 @dataclass
@@ -31,7 +30,7 @@ class ScreenState:
     screen_height: int = 0
     grid_cols: int = 0
     grid_rows: int = 0
-    grid_spacing: int = GRID_SIZE
+    grid_spacing: int = DEFAULT_GRID_SIZE
     total_points: int = 0
 
     def grid_info_text(self) -> str:
@@ -48,28 +47,45 @@ class ScreenState:
             f"（第一行 1~{self.grid_cols}，"
             f"第二行 {self.grid_cols + 1}~{self.grid_cols * 2}，以此类推）。\n"
             f"重要：大部分按钮/文字不会正好在标记点上。请用最近的标记点 + 偏移量点击，"
-            f"或直接用 phone_tap_coord 指定估算坐标。"
+            f"或直接用 desktop_click_coord 指定估算坐标。"
             f"偏移量参考：半格={gs // 2}px，1/3格≈{gs // 3}px。"
         )
 
 
 # ---------------------------------------------------------------------------
-# ScreenReader
+# DesktopScreenReader
 # ---------------------------------------------------------------------------
 
 
-class ScreenReader:
+class DesktopScreenReader:
     """截屏并覆盖编号圆圈标记点，AI 通过视觉理解屏幕内容。"""
 
-    def __init__(self, controller: PhoneController, scale: float = 0.5):
+    def __init__(
+        self,
+        controller: DesktopController,
+        scale: float = 0.5,
+        grid_size: int = DEFAULT_GRID_SIZE,
+    ):
         self.controller = controller
         self.scale = scale
+        self.grid_size = grid_size
         self._last_coord_map: dict[int, tuple[int, int]] = {}
+        self._window_offset: tuple[int, int] = (0, 0)  # 窗口截图的偏移量
 
-    async def read(self) -> ScreenState:
-        """截屏并生成带编号圆圈的 ScreenState。"""
-        img = await self.controller.screenshot()
+    async def read(self, hwnd: int | None = None) -> ScreenState:
+        """截屏并生成带编号圆圈的 ScreenState。hwnd=None 时全屏。"""
+        img = await asyncio.to_thread(self.controller.screenshot_sync, hwnd)
         original_w, original_h = img.size
+
+        # 记录窗口偏移（窗口截图时坐标需要转换）
+        if hwnd is not None:
+            import ctypes
+            import ctypes.wintypes as wt
+            rect = wt.RECT()
+            ctypes.windll.user32.GetWindowRect(hwnd, ctypes.byref(rect))
+            self._window_offset = (rect.left, rect.top)
+        else:
+            self._window_offset = (0, 0)
 
         # 缩放截图
         if self.scale != 1.0:
@@ -91,15 +107,17 @@ class ScreenReader:
             screen_height=original_h,
             grid_cols=n_cols,
             grid_rows=n_rows,
-            grid_spacing=GRID_SIZE,
+            grid_spacing=self.grid_size,
             total_points=len(coord_points),
         )
 
     def get_coord_center(self, label: int) -> tuple[int, int]:
-        """根据编号返回坐标（原始分辨率）。"""
+        """根据编号返回屏幕绝对坐标（含窗口偏移）。"""
         if label not in self._last_coord_map:
             raise ValueError(f"找不到标签 {label}，请先截图")
-        return self._last_coord_map[label]
+        x, y = self._last_coord_map[label]
+        ox, oy = self._window_offset
+        return x + ox, y + oy
 
     # ------------------------------------------------------------------
     # 内部方法
@@ -111,7 +129,7 @@ class ScreenReader:
         height: int,
     ) -> tuple[list[tuple[int, int, int]], int, int]:
         """生成全屏网格坐标点（行优先顺序，编号从 1 开始）。"""
-        gs = GRID_SIZE
+        gs = self.grid_size
 
         cols: list[int] = []
         x = gs // 2
@@ -125,7 +143,6 @@ class ScreenReader:
             rows.append(y)
             y += gs
 
-        # 行优先编号：第一行 1~n_cols, 第二行 n_cols+1~2*n_cols ...
         points: list[tuple[int, int, int]] = []
         label = 1
         for cy in rows:
@@ -173,11 +190,9 @@ class ScreenReader:
             except AttributeError:
                 tw, th = len(text) * 6, 10
 
-            # 文字位于圆圈右侧偏上
             tx = sx + circle_r + 2
             ty = sy - th // 2
 
-            # 半透明底色提高可读性
             draw.rectangle(
                 [tx - 1, ty - 1, tx + tw + 2, ty + th + 1],
                 fill=(0, 0, 0, 110),

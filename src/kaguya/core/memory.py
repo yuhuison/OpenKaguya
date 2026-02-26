@@ -1,7 +1,7 @@
 """RecursiveMemory — 递归摘要记忆系统（V2）。
 
 三层持久化记忆 + 工作记忆（L0）：
-  L0: 内存中的当前对话消息（最近 N 条）
+  L0: 内存中的当前对话消息（最近 N 条），同时持久化到 SQLite
   L1: SQLite short_term_memory — 对话摘要（每条 200-500 字）
   L2: SQLite long_term_memory  — L1 的再摘要（每条 500-1000 字）
   L3: SQLite core_memory       — 单条终极核心记忆（1000-2000 字）
@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import sqlite3
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
@@ -70,6 +71,14 @@ CREATE TABLE IF NOT EXISTS consciousness_log (
     action_summary TEXT NOT NULL,
     created_at     DATETIME DEFAULT CURRENT_TIMESTAMP
 );
+
+CREATE TABLE IF NOT EXISTS working_memory (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    role       TEXT NOT NULL,
+    content    TEXT NOT NULL,
+    timestamp  TEXT NOT NULL,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
 """
 
 
@@ -94,6 +103,11 @@ class RecursiveMemory:
         # 初始化数据库（同步，在 __init__ 中）
         self._init_db()
 
+        # 从数据库恢复持久化的工作记忆
+        self._working = self._db_load_working_memory()
+        if self._working:
+            logger.info(f"从数据库恢复了 {len(self._working)} 条工作记忆")
+
     def _init_db(self) -> None:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         conn = sqlite3.connect(self.db_path)
@@ -109,11 +123,14 @@ class RecursiveMemory:
     async def add_message(self, role: str, content: str) -> None:
         """向工作记忆添加一条消息，并在必要时触发压缩。"""
         async with self._lock:
+            ts = datetime.now().isoformat(timespec="seconds")
             self._working.append({
                 "role": role,
                 "content": content,
-                "timestamp": datetime.now().isoformat(timespec="seconds"),
+                "timestamp": ts,
             })
+            await asyncio.to_thread(self._db_persist_message, role, content, ts)
+
             if len(self._working) > self.config.working_memory_size:
                 await self._compress_l0_to_l1()
 
@@ -139,8 +156,19 @@ class RecursiveMemory:
 
         notes = await asyncio.to_thread(self._db_get_all_notes)
         if notes:
-            lines = [f"- **{t}**: {c}" for t, c in notes]
+            max_notes = self.config.max_notes
+            max_len = self.config.max_note_length
+            truncated = notes[:max_notes]
+            lines = [
+                f"- **{t}**: {c[:max_len]}{'...' if len(c) > max_len else ''}"
+                for t, c in truncated
+            ]
             parts.append("## 笔记本\n" + "\n".join(lines))
+
+        log_count = self.config.inject_consciousness_count
+        logs = await asyncio.to_thread(self._db_get_recent_logs, log_count)
+        if logs:
+            parts.append("## 最近自主行动\n" + "\n".join(f"- {l}" for l in logs))
 
         return "\n\n".join(parts)
 
@@ -204,7 +232,6 @@ class RecursiveMemory:
         """将工作记忆中最旧的 batch 条消息压缩为 L1 摘要。"""
         batch = self.config.l1_summarize_batch
         to_compress = self._working[:batch]
-        self._working = self._working[batch:]
 
         texts = [f"[{m['timestamp']}] {m['role']}: {m['content']}" for m in to_compress]
         start_time = to_compress[0]["timestamp"] if to_compress else None
@@ -221,13 +248,25 @@ class RecursiveMemory:
                 ),
             )
             await asyncio.to_thread(self._db_insert_l1, summary, start_time, end_time)
+
+            # 仅在成功保存后才移除工作记忆
+            self._working = self._working[batch:]
+            await asyncio.to_thread(self._db_trim_working_memory, len(self._working))
             logger.debug(f"L0→L1 压缩完成，共 {len(texts)} 条消息")
 
+            # 级联压缩作为后台任务，不阻塞 add_message
+            asyncio.create_task(self._maybe_cascade_l1())
+        except Exception as e:
+            logger.error(f"L0→L1 压缩失败: {e}")
+
+    async def _maybe_cascade_l1(self) -> None:
+        """检查是否需要 L1→L2 压缩（后台运行）。"""
+        try:
             l1_count = await asyncio.to_thread(self._db_count_l1)
             if l1_count > self.config.l1_max:
                 await self._compress_l1_to_l2()
         except Exception as e:
-            logger.error(f"L0→L1 压缩失败: {e}")
+            logger.error(f"L1 级联压缩检查失败: {e}")
 
     async def _compress_l1_to_l2(self) -> None:
         """将最旧的若干条 L1 摘要合并为一条 L2 记忆。"""
@@ -252,11 +291,19 @@ class RecursiveMemory:
             await asyncio.to_thread(self._db_insert_l2, summary, start_time, end_time)
             logger.debug(f"L1→L2 压缩完成，共 {len(oldest)} 条 L1 记忆")
 
+            # 级联 L2→L3 作为后台任务
+            asyncio.create_task(self._maybe_cascade_l2())
+        except Exception as e:
+            logger.error(f"L1→L2 压缩失败: {e}")
+
+    async def _maybe_cascade_l2(self) -> None:
+        """检查是否需要 L2→L3 压缩（后台运行）。"""
+        try:
             l2_count = await asyncio.to_thread(self._db_count_l2)
             if l2_count > self.config.l2_max:
                 await self._compress_l2_to_l3()
         except Exception as e:
-            logger.error(f"L1→L2 压缩失败: {e}")
+            logger.error(f"L2 级联压缩检查失败: {e}")
 
     async def _compress_l2_to_l3(self) -> None:
         """将溢出的 L2 记忆合并更新到核心记忆（L3）。"""
@@ -288,10 +335,47 @@ class RecursiveMemory:
     # 数据库操作（同步，用于 asyncio.to_thread）
     # ------------------------------------------------------------------
 
-    def _conn(self) -> sqlite3.Connection:
+    @contextmanager
+    def _conn(self):
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
-        return conn
+        try:
+            with conn:  # 事务上下文
+                yield conn
+        finally:
+            conn.close()
+
+    # ── Working Memory 持久化 ─────────────────────────────────────────
+
+    def _db_load_working_memory(self) -> list[dict[str, Any]]:
+        """启动时从数据库恢复工作记忆。"""
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT role, content, timestamp FROM working_memory ORDER BY id ASC"
+            ).fetchall()
+        return [
+            {"role": r["role"], "content": r["content"], "timestamp": r["timestamp"]}
+            for r in rows
+        ]
+
+    def _db_persist_message(self, role: str, content: str, timestamp: str) -> None:
+        """持久化单条工作记忆消息。"""
+        with self._conn() as conn:
+            conn.execute(
+                "INSERT INTO working_memory (role, content, timestamp) VALUES (?, ?, ?)",
+                (role, content, timestamp),
+            )
+
+    def _db_trim_working_memory(self, keep_count: int) -> None:
+        """清理已压缩的工作记忆持久化条目，只保留最新的 keep_count 条。"""
+        with self._conn() as conn:
+            conn.execute(
+                "DELETE FROM working_memory WHERE id NOT IN "
+                "(SELECT id FROM working_memory ORDER BY id DESC LIMIT ?)",
+                (keep_count,),
+            )
+
+    # ── L1 短期记忆 ──────────────────────────────────────────────────
 
     def _db_insert_l1(self, summary: str, start_time, end_time) -> None:
         with self._conn() as conn:
@@ -331,6 +415,8 @@ class RecursiveMemory:
             ).fetchall()
         return [dict(r) for r in rows]
 
+    # ── L2 长期记忆 ──────────────────────────────────────────────────
+
     def _db_insert_l2(self, summary: str, start_time, end_time) -> None:
         with self._conn() as conn:
             conn.execute(
@@ -369,6 +455,8 @@ class RecursiveMemory:
             ).fetchall()
         return [dict(r) for r in rows]
 
+    # ── L3 核心记忆 ──────────────────────────────────────────────────
+
     def _db_get_l3(self) -> Optional[str]:
         with self._conn() as conn:
             row = conn.execute("SELECT summary FROM core_memory WHERE id = 1").fetchone()
@@ -381,6 +469,8 @@ class RecursiveMemory:
                 "ON CONFLICT(id) DO UPDATE SET summary=excluded.summary, last_updated=excluded.last_updated",
                 (summary,),
             )
+
+    # ── Notes ────────────────────────────────────────────────────────
 
     def _db_upsert_note(self, title: str, content: str) -> None:
         with self._conn() as conn:
@@ -407,7 +497,9 @@ class RecursiveMemory:
     def _db_delete_note(self, title: str) -> bool:
         with self._conn() as conn:
             cur = conn.execute("DELETE FROM notes WHERE title = ?", (title,))
-        return cur.rowcount > 0
+            return cur.rowcount > 0
+
+    # ── Timers ───────────────────────────────────────────────────────
 
     def _db_insert_timer(self, label: str, trigger_at: datetime, recurrence: Optional[str]) -> int:
         with self._conn() as conn:
@@ -415,7 +507,7 @@ class RecursiveMemory:
                 "INSERT INTO timers (label, trigger_at, recurrence) VALUES (?, ?, ?)",
                 (label, trigger_at.isoformat(), recurrence),
             )
-        return cur.lastrowid
+            return cur.lastrowid
 
     def _db_get_triggered_timers(self) -> list[dict]:
         now = datetime.now().isoformat()
@@ -437,11 +529,20 @@ class RecursiveMemory:
             ).fetchall()
         return [dict(r) for r in rows]
 
+    # ── Consciousness Log ────────────────────────────────────────────
+
     def _db_insert_consciousness_log(self, action_summary: str) -> None:
         with self._conn() as conn:
             conn.execute(
                 "INSERT INTO consciousness_log (action_summary) VALUES (?)",
                 (action_summary,),
+            )
+            # 清理超限的旧条目
+            max_logs = self.config.max_consciousness_logs
+            conn.execute(
+                "DELETE FROM consciousness_log WHERE id NOT IN "
+                "(SELECT id FROM consciousness_log ORDER BY id DESC LIMIT ?)",
+                (max_logs,),
             )
 
     def _db_get_recent_logs(self, n: int) -> list[str]:
