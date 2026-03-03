@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "mcp__deepwiki__read_wiki_contents",
+      "Bash(echo \"EXIT_CODE=$?\")",
+      "Bash(uv run pytest tests/ -v)",
+      "Bash(pip show ruff)"
+    ]
+  }
+}

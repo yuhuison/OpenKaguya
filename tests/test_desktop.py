@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from PIL import Image
 
-from kaguya.desktop.screen import DEFAULT_GRID_SIZE, DesktopScreenReader, ScreenState
+from kaguya.desktop.screen import DesktopScreenReader, ScreenState
 from kaguya.desktop.tools import DESKTOP_TOOLS, DesktopToolExecutor
 
 
@@ -16,61 +16,26 @@ from kaguya.desktop.tools import DESKTOP_TOOLS, DesktopToolExecutor
 # ---------------------------------------------------------------------------
 
 
-def test_screen_state_grid_info():
+def test_screen_state_elements_info():
     state = ScreenState(
         image=Image.new("RGB", (100, 100)),
         screen_width=1920,
         screen_height=1080,
-        grid_cols=16,
-        grid_rows=9,
-        grid_spacing=120,
-        total_points=144,
+        elements=[
+            {"id": 1, "bbox": [10, 20, 50, 60], "confidence": 0.95},
+            {"id": 2, "bbox": [100, 200, 150, 250], "confidence": 0.87},
+        ],
+        total_elements=2,
     )
-    info = state.grid_info_text()
+    info = state.elements_info_text()
     assert "1920×1080" in info
-    assert "16列×9行" in info
-    assert "144" in info
-    assert "120px" in info
+    assert "2" in info
 
 
-def test_screen_state_grid_info_empty():
-    state = ScreenState(image=Image.new("RGB", (10, 10)), total_points=0)
-    assert state.grid_info_text() == ""
-
-
-# ---------------------------------------------------------------------------
-# DesktopScreenReader — 网格生成（纯逻辑）
-# ---------------------------------------------------------------------------
-
-
-def test_generate_grid_basic():
-    """测试网格坐标生成。"""
-    mock_ctrl = MagicMock()
-    reader = DesktopScreenReader(mock_ctrl, scale=1.0, grid_size=100)
-    points, cols, rows = reader._generate_grid(300, 200)
-
-    # 间距100, 起始50: x=[50,150,250] → 3列, y=[50,150] → 2行
-    assert cols == 3
-    assert rows == 2
-    assert len(points) == 6
-
-    # 编号从 1 开始，行优先
-    assert points[0] == (1, 50, 50)
-    assert points[1] == (2, 150, 50)
-    assert points[2] == (3, 250, 50)
-    assert points[3] == (4, 50, 150)
-    assert points[4] == (5, 150, 150)
-    assert points[5] == (6, 250, 150)
-
-
-def test_generate_grid_default_spacing():
-    mock_ctrl = MagicMock()
-    reader = DesktopScreenReader(mock_ctrl, scale=0.5)
-    # 1920x1080 默认间距120: x=[60,180,...] → 16列, y=[60,180,...] → 9行
-    points, cols, rows = reader._generate_grid(1920, 1080)
-    assert cols == 16
-    assert rows == 9
-    assert len(points) == 144
+def test_screen_state_elements_info_empty():
+    state = ScreenState(image=Image.new("RGB", (10, 10)), total_elements=0)
+    info = state.elements_info_text()
+    assert "未检测到" in info
 
 
 # ---------------------------------------------------------------------------
@@ -80,8 +45,7 @@ def test_generate_grid_default_spacing():
 
 def test_get_coord_center():
     mock_ctrl = MagicMock()
-    reader = DesktopScreenReader(mock_ctrl, scale=1.0, grid_size=100)
-    # 模拟 _last_coord_map
+    reader = DesktopScreenReader(mock_ctrl, scale=1.0)
     reader._last_coord_map = {1: (50, 50), 2: (150, 50)}
     reader._window_offset = (0, 0)
 
@@ -91,7 +55,7 @@ def test_get_coord_center():
 
 def test_get_coord_center_with_window_offset():
     mock_ctrl = MagicMock()
-    reader = DesktopScreenReader(mock_ctrl, scale=1.0, grid_size=100)
+    reader = DesktopScreenReader(mock_ctrl, scale=1.0)
     reader._last_coord_map = {1: (50, 50)}
     reader._window_offset = (100, 200)
 
@@ -102,7 +66,7 @@ def test_get_coord_center_invalid_label():
     mock_ctrl = MagicMock()
     reader = DesktopScreenReader(mock_ctrl)
     reader._last_coord_map = {}
-    with pytest.raises(ValueError, match="找不到标签"):
+    with pytest.raises(ValueError, match="找不到元素"):
         reader.get_coord_center(999)
 
 
@@ -176,10 +140,8 @@ def executor():
         image=Image.new("RGB", (960, 540)),
         screen_width=1920,
         screen_height=1080,
-        grid_cols=16,
-        grid_rows=9,
-        grid_spacing=120,
-        total_points=144,
+        elements=[{"id": 1, "bbox": [10, 20, 50, 60], "confidence": 0.9}],
+        total_elements=1,
     ))
 
     return DesktopToolExecutor(ctrl, reader)
@@ -188,7 +150,7 @@ def executor():
 async def test_tool_click(executor):
     result = await executor.execute("desktop_click", {"label": 5, "x_offset": 10, "y_offset": -5})
     assert result["success"] is True
-    assert "标记点 5" in result["clicked"]
+    assert "元素 5" in result["clicked"]
     executor.controller.click.assert_awaited_once_with(510, 295)
 
 

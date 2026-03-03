@@ -110,9 +110,18 @@ class ChatEngine:
             sid = self.interaction_log.start_session("chat")
             self.interaction_log.log(sid, "user_message", content)
             try:
-                return await self._process(content, images, sender_name, session_id=sid)
+                return await self._process(
+                    content, images, sender_name, session_id=sid, stage="chat",
+                )
             finally:
                 self.interaction_log.end_session(sid)
+
+    _TRIGGER_TO_STAGE: dict[str, str] = {
+        "heartbeat": "consciousness",
+        "notification": "notification",
+        "timer": "consciousness",
+        "extension": "chat",
+    }
 
     async def handle_consciousness(
         self,
@@ -121,13 +130,14 @@ class ChatEngine:
         pre_activate_groups: list[str] | None = None,
     ) -> str:
         """主动意识唤醒入口（加锁，防止与 handle_message 并发冲突）。"""
+        stage = self._TRIGGER_TO_STAGE.get(trigger, "chat")
         async with self._lock:
             sid = self.interaction_log.start_session(trigger)
             self.interaction_log.log(sid, "system", prompt[:500])
             try:
                 return await self._process(
                     prompt, sender_name="[系统唤醒]", session_id=sid,
-                    pre_activate_groups=pre_activate_groups,
+                    pre_activate_groups=pre_activate_groups, stage=stage,
                 )
             finally:
                 self.interaction_log.end_session(sid)
@@ -148,7 +158,10 @@ class ChatEngine:
             sid = self.interaction_log.start_session("chat")
             self.interaction_log.log(sid, "user_message", content)
             try:
-                return await self._process(content, images, sender_name, session_id=sid, on_event=on_event)
+                return await self._process(
+                    content, images, sender_name,
+                    session_id=sid, on_event=on_event, stage="chat",
+                )
             finally:
                 self.interaction_log.end_session(sid)
 
@@ -160,9 +173,11 @@ class ChatEngine:
         session_id: str | None = None,
         on_event=None,  # async callable for streaming events
         pre_activate_groups: list[str] | None = None,
+        stage: str = "chat",
     ) -> str:
-        # 0. 重置路由器状态 + 预激活
+        # 0. 重置路由器状态 + 设置阶段 + 预激活
         self.router.reset()
+        self.router.set_stage(stage)
         if pre_activate_groups:
             self.router.pre_activate(*pre_activate_groups)
 
@@ -170,7 +185,7 @@ class ChatEngine:
         history = self._build_history(content, images)
 
         # 2. 构建 system 消息（纯文本）
-        system_text = await self._build_system_prompt_text()
+        system_text = await self._build_system_prompt_text(stage=stage)
 
         messages: list[dict[str, Any]] = [
             {"role": "system", "content": system_text},
@@ -340,8 +355,8 @@ class ChatEngine:
 
         return msgs
 
-    async def _build_system_prompt_text(self) -> str:
-        """组装 system prompt 纯文本：人格 + 记忆上下文 + 行为准则 + 当前时间。"""
+    async def _build_system_prompt_text(self, stage: str = "chat") -> str:
+        """组装 system prompt 纯文本：人格 + 记忆上下文 + 行为准则 + 扩展信息 + 当前时间。"""
         parts: list[str] = []
 
         # 人格定义
@@ -364,6 +379,19 @@ class ChatEngine:
         chat_guidelines = p.get_guidelines("chat")
         if chat_guidelines:
             parts.append(f"【行为准则】\n{chat_guidelines}")
+
+        # 扩展 Prompt 注入
+        if self.router._extension_manager:
+            from kaguya.extensions.base import Stage
+            try:
+                ext_prompts = await self.router._extension_manager.get_all_prompts(
+                    Stage(stage),
+                )
+                for ep in ext_prompts:
+                    if ep.strip():
+                        parts.append(ep)
+            except (ValueError, Exception):
+                pass
 
         # 当前时间
         now = datetime.now().strftime("%Y年%m月%d日 %H:%M")

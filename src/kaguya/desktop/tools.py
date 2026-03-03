@@ -1,6 +1,6 @@
 """desktop/tools.py — 暴露给 LLM 的桌面操作工具。
 
-V2 桌面版：AI 通过截图上的编号圆圈标记点进行交互。
+V2 桌面版：AI 通过 YOLO 检测的 UI 元素编号进行交互。
 """
 
 from __future__ import annotations
@@ -26,8 +26,9 @@ DESKTOP_TOOLS: list[dict] = [
         "function": {
             "name": "desktop_screenshot",
             "description": (
-                "截取电脑桌面屏幕，返回带编号圆圈标记的截图。"
-                "截图上覆盖红色圆圈标记点，每个圆圈旁有数字编号（从左到右、从上到下递增）。"
+                "截取电脑桌面屏幕，返回带编号边界框标注的截图。"
+                "YOLO 自动检测所有 UI 元素（按钮、图标、文本框等），"
+                "每个元素用红色边界框标注并编号（从上到下、从左到右递增）。"
                 "可选参数 window_title 指定截取某个窗口（模糊匹配）。不填则全屏截图。"
             ),
             "parameters": {
@@ -47,9 +48,9 @@ DESKTOP_TOOLS: list[dict] = [
         "function": {
             "name": "desktop_click",
             "description": (
-                "点击截图中编号标记点附近的位置。"
-                "选择离目标最近的标记点编号，然后用 x_offset/y_offset 偏移到目标实际位置。"
-                "大多数按钮不在标记点正上方，务必估算偏移量！"
+                "点击截图中检测到的 UI 元素。"
+                "直接使用元素编号即可点击元素中心。"
+                "如需微调点击位置，可加 x_offset/y_offset 偏移。"
                 "偏移方向：x正=右，x负=左，y正=下，y负=上。"
             ),
             "parameters": {
@@ -57,7 +58,7 @@ DESKTOP_TOOLS: list[dict] = [
                 "properties": {
                     "label": {
                         "type": "integer",
-                        "description": "标记点编号",
+                        "description": "元素编号",
                     },
                     "x_offset": {
                         "type": "integer",
@@ -78,7 +79,7 @@ DESKTOP_TOOLS: list[dict] = [
             "name": "desktop_click_coord",
             "description": (
                 "按像素坐标直接点击屏幕。"
-                "适合精确点击：根据截图中标记点的位置推算目标坐标。"
+                "适合精确点击或未检测到目标元素时使用。"
             ),
             "parameters": {
                 "type": "object",
@@ -94,13 +95,13 @@ DESKTOP_TOOLS: list[dict] = [
         "type": "function",
         "function": {
             "name": "desktop_double_click",
-            "description": "双击截图中编号标记点附近的位置（打开文件、选中词语等）。",
+            "description": "双击截图中检测到的 UI 元素（打开文件、选中词语等）。",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "label": {
                         "type": "integer",
-                        "description": "标记点编号",
+                        "description": "元素编号",
                     },
                     "x_offset": {
                         "type": "integer",
@@ -119,13 +120,13 @@ DESKTOP_TOOLS: list[dict] = [
         "type": "function",
         "function": {
             "name": "desktop_right_click",
-            "description": "右键点击截图中编号标记点附近的位置（打开右键菜单）。",
+            "description": "右键点击截图中检测到的 UI 元素（打开右键菜单）。",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "label": {
                         "type": "integer",
-                        "description": "标记点编号",
+                        "description": "元素编号",
                     },
                     "x_offset": {
                         "type": "integer",
@@ -183,7 +184,7 @@ DESKTOP_TOOLS: list[dict] = [
         "function": {
             "name": "desktop_scroll",
             "description": (
-                "在标记点位置滚动鼠标滚轮。"
+                "在元素位置滚动鼠标滚轮。"
                 "适用于滚动网页、文档、列表等。"
             ),
             "parameters": {
@@ -191,7 +192,7 @@ DESKTOP_TOOLS: list[dict] = [
                 "properties": {
                     "label": {
                         "type": "integer",
-                        "description": "滚动位置的标记点编号",
+                        "description": "滚动位置的元素编号",
                     },
                     "direction": {
                         "type": "string",
@@ -212,7 +213,7 @@ DESKTOP_TOOLS: list[dict] = [
         "function": {
             "name": "desktop_drag",
             "description": (
-                "从一个标记点拖动到另一个标记点。"
+                "从一个元素拖动到另一个元素。"
                 "适用于拖拽文件、选择文本范围、移动窗口等。"
             ),
             "parameters": {
@@ -220,11 +221,11 @@ DESKTOP_TOOLS: list[dict] = [
                 "properties": {
                     "from_label": {
                         "type": "integer",
-                        "description": "起始标记点编号",
+                        "description": "起始元素编号",
                     },
                     "to_label": {
                         "type": "integer",
-                        "description": "目标标记点编号",
+                        "description": "目标元素编号",
                     },
                 },
                 "required": ["from_label", "to_label"],
@@ -336,7 +337,7 @@ class DesktopToolExecutor:
         return {
             "image_base64": img_b64,
             "image_media_type": "image/jpeg",
-            "text": state.grid_info_text(),
+            "text": state.elements_info_text(),
         }
 
     # --- 点击 ---
@@ -354,7 +355,7 @@ class DesktopToolExecutor:
         offset_str = ""
         if x_offset or y_offset:
             offset_str = f" +偏移({x_offset},{y_offset})"
-        return {"success": True, "clicked": f"标记点 {label}{offset_str} → ({x}, {y})"}
+        return {"success": True, "clicked": f"元素 {label}{offset_str} → ({x}, {y})"}
 
     async def _tool_desktop_click_coord(self, x: int, y: int) -> dict[str, Any]:
         await self.controller.click(x, y)
@@ -370,7 +371,7 @@ class DesktopToolExecutor:
         x += x_offset
         y += y_offset
         await self.controller.double_click(x, y)
-        return {"success": True, "double_clicked": f"标记点 {label} → ({x}, {y})"}
+        return {"success": True, "double_clicked": f"元素 {label} → ({x}, {y})"}
 
     async def _tool_desktop_right_click(
         self, label: int, x_offset: int = 0, y_offset: int = 0,
@@ -382,7 +383,7 @@ class DesktopToolExecutor:
         x += x_offset
         y += y_offset
         await self.controller.click(x, y, button="right")
-        return {"success": True, "right_clicked": f"标记点 {label} → ({x}, {y})"}
+        return {"success": True, "right_clicked": f"元素 {label} → ({x}, {y})"}
 
     # --- 输入 ---
 
@@ -405,7 +406,7 @@ class DesktopToolExecutor:
         except ValueError as e:
             return {"error": str(e)}
         await self.controller.scroll(x, y, clicks, direction)
-        return {"success": True, "scrolled": f"标记点 {label} {direction} ×{clicks}"}
+        return {"success": True, "scrolled": f"元素 {label} {direction} ×{clicks}"}
 
     async def _tool_desktop_drag(
         self, from_label: int, to_label: int,
@@ -418,7 +419,7 @@ class DesktopToolExecutor:
         await self.controller.drag(x1, y1, x2, y2)
         return {
             "success": True,
-            "dragged": f"标记点 {from_label}({x1},{y1}) → {to_label}({x2},{y2})",
+            "dragged": f"元素 {from_label}({x1},{y1}) → {to_label}({x2},{y2})",
         }
 
     # --- 窗口管理 ---

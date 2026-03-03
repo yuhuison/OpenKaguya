@@ -16,6 +16,8 @@ dependencies = [
     "mss>=9.0.0",
     "winrt-Windows.UI.Notifications.Management>=2.0.0",
     "winrt-Windows.UI.Notifications>=2.0.0",
+    "ultralytics>=8.0.0",
+    "huggingface-hub>=0.20.0",
 ]
 
 [project.optional-dependencies]

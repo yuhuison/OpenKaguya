@@ -41,6 +41,17 @@ class ToolRouter:
         self._gateways: dict[str, GatewayDef] = {}
         self._active_groups: set[str] = set()
         self._gateway_tools: list[dict] = []
+        self._extension_manager: Any | None = None
+        self._current_stage: str = "chat"
+        self._reset_callbacks: list = []
+
+    def set_extension_manager(self, mgr: Any) -> None:
+        """注入 ExtensionManager。"""
+        self._extension_manager = mgr
+
+    def set_stage(self, stage: str) -> None:
+        """设置当前处理阶段（每次 _process 开始时调用）。"""
+        self._current_stage = stage
 
     # ------------------------------------------------------------------
     # 注册
@@ -69,9 +80,19 @@ class ToolRouter:
     # Per-turn 状态管理
     # ------------------------------------------------------------------
 
+    def register_reset_callback(self, callback) -> None:
+        """注册一个在 reset() 时被调用的回调。"""
+        self._reset_callbacks.append(callback)
+
     def reset(self) -> None:
         """重置当前轮次的激活状态（每次 _process 开始时调用）。"""
         self._active_groups.clear()
+        self._current_stage = "chat"
+        for cb in self._reset_callbacks:
+            try:
+                cb()
+            except Exception as e:
+                logger.warning(f"Reset callback 执行失败: {e}")
 
     def pre_activate(self, *group_names: str) -> None:
         """预激活指定 group（意识系统用，避免多一轮 gateway 调用）。"""
@@ -85,7 +106,7 @@ class ToolRouter:
     # ------------------------------------------------------------------
 
     def get_active_tools(self) -> list[dict]:
-        """返回当前可见的所有工具 schema（base + 已激活 gated + 未激活的 gateway）。"""
+        """返回当前可见的所有工具 schema（base + 已激活 gated + 未激活的 gateway + 扩展）。"""
         tools: list[dict] = []
         for group in self._groups.values():
             if group.is_base or group.name in self._active_groups:
@@ -96,6 +117,13 @@ class ToolRouter:
             gw_def = self._gateways[gw_name]
             if gw_def.activates not in self._active_groups:
                 tools.append(gw_schema)
+        # 扩展工具（按当前阶段过滤）
+        if self._extension_manager:
+            from kaguya.extensions.base import Stage
+            try:
+                tools += self._extension_manager.get_all_tools(Stage(self._current_stage))
+            except (ValueError, Exception):
+                pass
         return tools
 
     def get_all_tools(self) -> list[dict]:
@@ -103,6 +131,16 @@ class ToolRouter:
         tools: list[dict] = []
         for group in self._groups.values():
             tools.extend(group.tools)
+        # 扩展工具：所有阶段去重合并
+        if self._extension_manager:
+            from kaguya.extensions.base import Stage
+            seen = {t["function"]["name"] for t in tools}
+            for stage in Stage:
+                for t in self._extension_manager.get_all_tools(stage):
+                    name = t["function"]["name"]
+                    if name not in seen:
+                        tools.append(t)
+                        seen.add(name)
         return tools
 
     def get_all_executors(self) -> list:
@@ -130,6 +168,13 @@ class ToolRouter:
                 except Exception as e:
                     logger.error(f"工具 [{tool_name}] 执行异常: {e}")
                     return {"error": str(e)}
+
+        # 最后尝试扩展执行器
+        if self._extension_manager:
+            ext_result = await self._extension_manager.execute_tool(tool_name, args)
+            if ext_result is not None:
+                return ext_result
+
         return {"error": f"未知工具: {tool_name}"}
 
     async def _execute_gateway(self, tool_name: str) -> dict[str, Any]:

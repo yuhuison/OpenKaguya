@@ -39,6 +39,7 @@ class LLMModelConfig:
 class LLMConfig:
     primary: LLMModelConfig = field(default_factory=LLMModelConfig)
     summarizer: LLMModelConfig = field(default_factory=LLMModelConfig)
+    agent: LLMModelConfig | None = None  # 子代理模型（可选，默认回退到 summarizer）
 
 
 @dataclass
@@ -121,7 +122,9 @@ class ImageConfig:
 class DesktopConfig:
     enabled: bool = True
     screenshot_scale: float = 0.5  # 截图缩放比例
-    grid_size: int = 120           # 网格间距（可调大以适配高分屏）
+    yolo_model_repo: str = "microsoft/OmniParser-v2.0"
+    yolo_model_file: str = "icon_detect/model.pt"
+    box_threshold: float = 0.05
 
 
 @dataclass
@@ -146,6 +149,9 @@ class AppConfig:
     image: ImageConfig = field(default_factory=ImageConfig)
     browser: BrowserConfig = field(default_factory=BrowserConfig)
     desktop: DesktopConfig = field(default_factory=DesktopConfig)
+
+    # 扩展配置段（[extensions.*]）
+    extensions_raw: dict[str, Any] = field(default_factory=dict)
 
     # 运行时状态：指向 user_mixin.toml 的路径
     _mixin_path: str = ""
@@ -249,6 +255,16 @@ def load_config(config_dir: str | Path | None = None, data_dir: str | Path | Non
         summarizer_raw["api_key"] = api_keys.get("summarizer", api_keys.get("secondary", ""))
     cfg.llm.summarizer = _parse_llm_model(summarizer_raw)
 
+    # ── LLM Agent（可选，不配则回退到 summarizer）────────────────────────
+    agent_raw = llm_raw.get("agent")
+    if agent_raw:
+        agent_dict = dict(agent_raw)
+        if not agent_dict.get("api_key"):
+            agent_dict["api_key"] = (
+                api_keys.get("agent", "") or cfg.llm.summarizer.api_key
+            )
+        cfg.llm.agent = _parse_llm_model(agent_dict)
+
     # ── Memory ────────────────────────────────────────────────────────────
     mem_raw = raw.get("memory", {})
     cfg.memory = MemoryConfig(
@@ -324,7 +340,9 @@ def load_config(config_dir: str | Path | None = None, data_dir: str | Path | Non
     cfg.desktop = DesktopConfig(
         enabled=bool(desktop_raw.get("enabled", True)),
         screenshot_scale=float(desktop_raw.get("screenshot_scale", 0.5)),
-        grid_size=int(desktop_raw.get("grid_size", 120)),
+        yolo_model_repo=str(desktop_raw.get("yolo_model_repo", "microsoft/OmniParser-v2.0")),
+        yolo_model_file=str(desktop_raw.get("yolo_model_file", "icon_detect/model.pt")),
+        box_threshold=float(desktop_raw.get("box_threshold", 0.05)),
     )
 
     # ── Persona ───────────────────────────────────────────────────────────
@@ -342,5 +360,8 @@ def load_config(config_dir: str | Path | None = None, data_dir: str | Path | Non
         guidelines_notification=guidelines.get("notification", ""),
         guidelines_heartbeat=guidelines.get("heartbeat", ""),
     )
+
+    # ── Extensions ─────────────────────────────────────────────────────────
+    cfg.extensions_raw = raw.get("extensions", {})
 
     return cfg

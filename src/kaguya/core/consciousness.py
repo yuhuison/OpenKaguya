@@ -35,6 +35,7 @@ class ConsciousnessScheduler:
         engine: "ChatEngine",
         memory: "RecursiveMemory",
         notification_source: Any | None = None,
+        extension_manager: Any | None = None,
         consciousness_config: ConsciousnessConfig | None = None,
         notifications_config: NotificationsConfig | None = None,
         persona: Optional[PersonaConfig] = None,
@@ -43,6 +44,7 @@ class ConsciousnessScheduler:
         self.engine = engine
         self.memory = memory
         self.notification_source = notification_source
+        self.extension_manager = extension_manager
         self.con_cfg = consciousness_config or ConsciousnessConfig()
         self.notif_cfg = notifications_config or NotificationsConfig()
         self.persona = persona
@@ -82,7 +84,12 @@ class ConsciousnessScheduler:
 
     async def notification_loop(self) -> None:
         """通知轮询循环，有新消息时唤醒 AI。"""
-        if not self.notification_source:
+        has_source = self.notification_source is not None
+        has_extensions = (
+            self.extension_manager is not None
+            and self.extension_manager.has_notification_extensions()
+        )
+        if not has_source and not has_extensions:
             logger.info("未配置通知源，通知轮询跳过")
             return
 
@@ -113,7 +120,7 @@ class ConsciousnessScheduler:
         prompt = await self._build_wakeup_prompt()
         logger.info("主动意识唤醒")
         reply = await self.engine.handle_consciousness(
-            prompt, trigger="heartbeat", pre_activate_groups=[self.platform],
+            prompt, trigger="heartbeat",
         )
 
         # 记录意识日志
@@ -122,7 +129,22 @@ class ConsciousnessScheduler:
 
     async def _check_notifications(self) -> None:
         """检查通知，有新消息时唤醒 AI（带防抖）。"""
-        notifications = await self.notification_source.get_notifications()
+        notifications: list[dict] = []
+
+        # 内建通知源
+        if self.notification_source:
+            try:
+                notifications += await self.notification_source.get_notifications()
+            except Exception as e:
+                logger.debug(f"内建通知源拉取失败: {e}")
+
+        # 扩展通知源
+        if self.extension_manager:
+            try:
+                notifications += await self.extension_manager.get_all_notifications()
+            except Exception as e:
+                logger.debug(f"扩展通知源拉取失败: {e}")
+
         if not notifications:
             return
 
@@ -168,7 +190,7 @@ class ConsciousnessScheduler:
             if notif_guidelines:
                 prompt += f"\n\n【通知处理准则】\n{notif_guidelines}"
         reply = await self.engine.handle_consciousness(
-            prompt, trigger="notification", pre_activate_groups=[self.platform],
+            prompt, trigger="notification",
         )
         if reply:
             await self.memory.log_consciousness(f"[通知处理] {reply[:200]}")
@@ -231,10 +253,9 @@ class ConsciousnessScheduler:
             + "\n".join(lines)
             + "\n\n【处理方式】\n"
             "如果要查看或回复消息，推荐操作流程：\n"
-            "1. 调用 desktop_focus_window 聚焦对应窗口\n"
-            "2. 截图查看窗口内容\n"
-            "3. 在窗口中操作（点击、输入回复等）\n"
-            "注意：每次操作后记得截图确认结果。\n"
+            "1. 创建一个桌面子代理 (create_sub_agent_session)\n"
+            "2. 指示子代理聚焦对应窗口并截图\n"
+            "3. 查看子代理汇报的截图后，指示子代理进行操作\n"
             "也可以选择暂时不处理。"
         )
 
@@ -267,8 +288,8 @@ class ConsciousnessScheduler:
             parts.append("待处理的定时任务：\n" + "\n".join(timer_lines))
 
         parts.append(
-            "现在由你自由决定做什么——可以查看桌面通知、回复消息、操作电脑、上网浏览、记笔记，"
-            "或者什么都不做（直接回复「暂时不做什么」也完全OK）。"
+            "现在由你自由决定做什么——可以创建子代理来查看桌面通知、回复消息、操作电脑、上网浏览，"
+            "也可以记笔记，或者什么都不做（直接回复「暂时不做什么」也完全OK）。"
         )
 
         if self.persona:

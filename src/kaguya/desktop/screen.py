@@ -1,16 +1,19 @@
-"""DesktopScreenReader — 桌面屏幕理解模块。
+"""DesktopScreenReader — YOLO UI 元素检测方案。
 
-网格标注方案：
-  1. 截图并缩放
-  2. 覆盖全屏编号圆圈标记点（行优先，从左到右、从上到下）
-  3. AI 通过视觉理解截图内容，用编号 + 偏移量定位点击
+基于 OmniParser 的 icon_detect 模型（YOLO）：
+  1. 截图
+  2. YOLO 检测所有 UI 元素（按钮、图标、文本框等）
+  3. 在截图上绘制编号边界框
+  4. AI 通过编号直接点击目标元素
 """
 
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import Any
 
+from loguru import logger
 from PIL import Image, ImageDraw, ImageFont
 
 from kaguya.desktop.controller import DesktopController
@@ -20,36 +23,48 @@ from kaguya.desktop.controller import DesktopController
 # 数据模型
 # ---------------------------------------------------------------------------
 
-DEFAULT_GRID_SIZE = 120
-
 
 @dataclass
 class ScreenState:
-    image: Image.Image  # 带圆圈标注的截图
+    image: Image.Image  # 带编号边界框的截图
     screen_width: int = 0
     screen_height: int = 0
-    grid_cols: int = 0
-    grid_rows: int = 0
-    grid_spacing: int = DEFAULT_GRID_SIZE
-    total_points: int = 0
+    elements: list[dict[str, Any]] = field(default_factory=list)
+    total_elements: int = 0
 
-    def grid_info_text(self) -> str:
-        """返回网格信息，供 LLM 理解屏幕坐标系。"""
-        if not self.total_points:
-            return ""
-        gs = self.grid_spacing
+    def elements_info_text(self) -> str:
+        """返回元素检测信息，供 LLM 理解屏幕内容。"""
+        if not self.total_elements:
+            return "未检测到 UI 元素。可使用 desktop_click_coord(x, y) 直接按坐标点击。"
         return (
             f"屏幕 {self.screen_width}×{self.screen_height}，"
-            f"网格 {self.grid_cols}列×{self.grid_rows}行，"
-            f"共 {self.total_points} 个标记点，"
-            f"相邻点间距 {gs}px。\n"
-            f"编号从左到右、从上到下递增"
-            f"（第一行 1~{self.grid_cols}，"
-            f"第二行 {self.grid_cols + 1}~{self.grid_cols * 2}，以此类推）。\n"
-            f"重要：大部分按钮/文字不会正好在标记点上。请用最近的标记点 + 偏移量点击，"
-            f"或直接用 desktop_click_coord 指定估算坐标。"
-            f"偏移量参考：半格={gs // 2}px，1/3格≈{gs // 3}px。"
+            f"检测到 {self.total_elements} 个 UI 元素。\n"
+            f"每个元素的编号标注在截图中的红色边界框旁。\n"
+            f"使用 desktop_click(label=编号) 直接点击元素中心。\n"
+            f"如需精确控制位置，可加 x_offset/y_offset 微调，"
+            f"或用 desktop_click_coord(x, y) 按坐标点击。"
         )
+
+
+# ---------------------------------------------------------------------------
+# YOLO 模型加载
+# ---------------------------------------------------------------------------
+
+
+def _download_and_load_yolo(model_repo: str, model_file: str):
+    """从 HuggingFace 下载并加载 YOLO 模型。"""
+    import torch
+    from huggingface_hub import hf_hub_download
+    from ultralytics import YOLO
+
+    logger.info(f"下载 YOLO 模型: {model_repo}/{model_file}")
+    model_path = hf_hub_download(repo_id=model_repo, filename=model_file)
+
+    model = YOLO(model_path)
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    model.to(device)
+    logger.info(f"YOLO 模型已加载: device={device}")
+    return model
 
 
 # ---------------------------------------------------------------------------
@@ -58,26 +73,41 @@ class ScreenState:
 
 
 class DesktopScreenReader:
-    """截屏并覆盖编号圆圈标记点，AI 通过视觉理解屏幕内容。"""
+    """截屏并用 YOLO 检测 UI 元素，AI 通过编号点击目标。"""
 
     def __init__(
         self,
         controller: DesktopController,
         scale: float = 0.5,
-        grid_size: int = DEFAULT_GRID_SIZE,
+        *,
+        yolo_model_repo: str = "microsoft/OmniParser-v2.0",
+        yolo_model_file: str = "icon_detect/model.pt",
+        box_threshold: float = 0.05,
     ):
         self.controller = controller
         self.scale = scale
-        self.grid_size = grid_size
+        self.box_threshold = box_threshold
+        self._yolo_model_repo = yolo_model_repo
+        self._yolo_model_file = yolo_model_file
+        self._model = None  # 懒加载
         self._last_coord_map: dict[int, tuple[int, int]] = {}
-        self._window_offset: tuple[int, int] = (0, 0)  # 窗口截图的偏移量
+        self._window_offset: tuple[int, int] = (0, 0)
+
+    def _ensure_model(self):
+        """懒加载 YOLO 模型（首次截图时触发下载）。"""
+        if self._model is None:
+            self._model = _download_and_load_yolo(
+                self._yolo_model_repo, self._yolo_model_file,
+            )
 
     async def read(self, hwnd: int | None = None) -> ScreenState:
-        """截屏并生成带编号圆圈的 ScreenState。hwnd=None 时全屏。"""
+        """截屏并检测 UI 元素，返回带编号标注的 ScreenState。"""
+        self._ensure_model()
+
         img = await asyncio.to_thread(self.controller.screenshot_sync, hwnd)
         original_w, original_h = img.size
 
-        # 记录窗口偏移（窗口截图时坐标需要转换）
+        # 窗口偏移
         if hwnd is not None:
             import ctypes
             import ctypes.wintypes as wt
@@ -87,6 +117,26 @@ class DesktopScreenReader:
         else:
             self._window_offset = (0, 0)
 
+        # YOLO 检测（在原始分辨率上）
+        detections = await asyncio.to_thread(
+            self._detect, img, self.box_threshold,
+        )
+
+        # 构建坐标映射（原始分辨率，编号从 1 开始）
+        self._last_coord_map = {}
+        elements = []
+        for i, det in enumerate(detections):
+            label = i + 1
+            x1, y1, x2, y2 = det["bbox"]
+            cx = int((x1 + x2) / 2)
+            cy = int((y1 + y2) / 2)
+            self._last_coord_map[label] = (cx, cy)
+            elements.append({
+                "id": label,
+                "bbox": det["bbox"],
+                "confidence": det["confidence"],
+            })
+
         # 缩放截图
         if self.scale != 1.0:
             img = img.resize(
@@ -94,27 +144,21 @@ class DesktopScreenReader:
                 Image.LANCZOS,
             )
 
-        # 生成网格坐标点（行优先）
-        coord_points, n_cols, n_rows = self._generate_grid(original_w, original_h)
-        self._last_coord_map = {label: (x, y) for label, x, y in coord_points}
-
-        # 绘制圆圈标注
-        annotated = self._annotate(img, coord_points, self.scale)
+        # 绘制编号边界框
+        annotated = self._annotate(img, detections, self.scale)
 
         return ScreenState(
             image=annotated,
             screen_width=original_w,
             screen_height=original_h,
-            grid_cols=n_cols,
-            grid_rows=n_rows,
-            grid_spacing=self.grid_size,
-            total_points=len(coord_points),
+            elements=elements,
+            total_elements=len(elements),
         )
 
     def get_coord_center(self, label: int) -> tuple[int, int]:
-        """根据编号返回屏幕绝对坐标（含窗口偏移）。"""
+        """根据元素编号返回屏幕绝对坐标（含窗口偏移）。"""
         if label not in self._last_coord_map:
-            raise ValueError(f"找不到标签 {label}，请先截图")
+            raise ValueError(f"找不到元素 {label}，请先截图")
         x, y = self._last_coord_map[label]
         ox, oy = self._window_offset
         return x + ox, y + oy
@@ -123,81 +167,81 @@ class DesktopScreenReader:
     # 内部方法
     # ------------------------------------------------------------------
 
-    def _generate_grid(
-        self,
-        width: int,
-        height: int,
-    ) -> tuple[list[tuple[int, int, int]], int, int]:
-        """生成全屏网格坐标点（行优先顺序，编号从 1 开始）。"""
-        gs = self.grid_size
-
-        cols: list[int] = []
-        x = gs // 2
-        while x < width:
-            cols.append(x)
-            x += gs
-
-        rows: list[int] = []
-        y = gs // 2
-        while y < height:
-            rows.append(y)
-            y += gs
-
-        points: list[tuple[int, int, int]] = []
-        label = 1
-        for cy in rows:
-            for cx in cols:
-                points.append((label, cx, cy))
-                label += 1
-
-        return points, len(cols), len(rows)
+    def _detect(self, img: Image.Image, threshold: float) -> list[dict[str, Any]]:
+        """在图像上运行 YOLO 检测，返回检测结果列表。"""
+        results = self._model.predict(source=img, conf=threshold, iou=0.1, verbose=False)
+        detections = []
+        if results and len(results) > 0:
+            boxes = results[0].boxes
+            for i in range(len(boxes)):
+                x1, y1, x2, y2 = boxes.xyxy[i].tolist()
+                conf = boxes.conf[i].item()
+                detections.append({
+                    "bbox": [int(x1), int(y1), int(x2), int(y2)],
+                    "confidence": round(conf, 3),
+                })
+        # 按 y 坐标排序（从上到下、从左到右），使编号更直观
+        detections.sort(key=lambda d: (d["bbox"][1] // 50, d["bbox"][0]))
+        return detections
 
     def _annotate(
         self,
         img: Image.Image,
-        coord_points: list[tuple[int, int, int]],
+        detections: list[dict[str, Any]],
         scale: float = 1.0,
     ) -> Image.Image:
-        """在截图上绘制编号圆圈标记点。"""
+        """在截图上绘制编号边界框。"""
         annotated = img.copy().convert("RGBA")
         overlay = Image.new("RGBA", annotated.size, (0, 0, 0, 0))
         draw = ImageDraw.Draw(overlay)
 
+        # 根据图片大小调整绘制参数
+        box_overlay_ratio = max(img.size) / 3200
+        thickness = max(int(3 * box_overlay_ratio), 1)
+
         try:
-            font = ImageFont.truetype("arial.ttf", max(9, int(11 * scale)))
+            font_size = max(10, int(14 * box_overlay_ratio))
+            font = ImageFont.truetype("arial.ttf", font_size)
         except Exception:
             font = ImageFont.load_default()
 
-        circle_r = max(3, int(5 * scale))
+        for i, det in enumerate(detections):
+            label = i + 1
+            x1, y1, x2, y2 = det["bbox"]
 
-        for label, cx, cy in coord_points:
-            sx = int(cx * scale)
-            sy = int(cy * scale)
+            # 缩放坐标
+            sx1 = int(x1 * scale)
+            sy1 = int(y1 * scale)
+            sx2 = int(x2 * scale)
+            sy2 = int(y2 * scale)
 
-            # 圆圈标记
-            draw.ellipse(
-                [sx - circle_r, sy - circle_r, sx + circle_r, sy + circle_r],
-                fill=(255, 70, 70, 130),
-                outline=(255, 255, 255, 160),
+            # 边界框
+            draw.rectangle(
+                [sx1, sy1, sx2, sy2],
+                outline=(255, 70, 70, 200),
+                width=thickness,
             )
 
-            # 编号文字
+            # 编号标签
             text = str(label)
             try:
                 bbox = draw.textbbox((0, 0), text, font=font)
                 tw = bbox[2] - bbox[0]
                 th = bbox[3] - bbox[1]
             except AttributeError:
-                tw, th = len(text) * 6, 10
+                tw, th = len(text) * 7, 12
 
-            tx = sx + circle_r + 2
-            ty = sy - th // 2
-
+            # 标签背景（左上角）
+            lx = sx1
+            ly = max(sy1 - th - 4, 0)
             draw.rectangle(
-                [tx - 1, ty - 1, tx + tw + 2, ty + th + 1],
-                fill=(0, 0, 0, 110),
+                [lx, ly, lx + tw + 6, ly + th + 4],
+                fill=(255, 70, 70, 220),
             )
-            draw.text((tx, ty), text, fill=(255, 255, 255, 210), font=font)
+            draw.text(
+                (lx + 3, ly + 2), text,
+                fill=(255, 255, 255, 255), font=font,
+            )
 
         annotated = Image.alpha_composite(annotated, overlay)
         return annotated.convert("RGB")
